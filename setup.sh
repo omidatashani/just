@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  ULTIMATE SETUP: PAQET + OPTIONAL X-UI + LOCAL FILES
+#  ULTIMATE SETUP: PAQET + X-UI + ROBUST NETWORKING
 # =========================================================
 
 # --- DEFAULTS ---
@@ -30,20 +30,21 @@ check_root() {
 
 # --- SMART FILE ACQUISITION (Download OR Local) ---
 get_file() {
-    local name=$1      # Display Name (e.g. "Paqet")
+    local name=$1      # Display Name
     local url=$2       # Default URL
-    local outfile=$3   # Output filename (e.g. "paqet.tar.gz")
+    local outfile=$3   # Output filename
     
     echo ""
     echo -e "${YELLOW}>>> How do you want to get $name?${NC}"
     echo "   1) Download from Internet (Default)"
     echo "   2) Use a Local File (I uploaded it to /root/...)"
-    read -p "   Select [1-2]: " choice
+    read -p "   Select [1-2] (Press Enter for 1): " choice
+    choice=${choice:-1}
     
     if [ "$choice" == "2" ]; then
         # Local File Mode
         while true; do
-            read -p "   Enter full path to file (e.g. /root/file.zip): " localpath
+            read -p "   Enter full path to file (e.g. /root/file.tar.gz): " localpath
             if [ -f "$localpath" ]; then
                 cp "$localpath" "$outfile"
                 print_success "Loaded $name from local file."
@@ -55,6 +56,7 @@ get_file() {
     else
         # Download Mode
         print_info "Downloading $name..."
+        rm -f "$outfile"
         wget --show-progress -q -T 60 -c -O "$outfile" "$url"
         
         # Verify
@@ -62,7 +64,7 @@ get_file() {
             print_success "Download complete."
             return 0
         else
-            print_warn "Download Failed!"
+            print_warn "Download Failed or Blocked!"
             read -p "   Do you have a local file instead? [y/N]: " retry_local
             if [[ "$retry_local" =~ ^[Yy]$ ]]; then
                 # Retry with local
@@ -82,9 +84,9 @@ install_dependencies() {
 
     PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip"
     
+    # Try install
     if ! apt-get install -y $PKGS; then
         print_warn "Apt failed. Switching to Iran mirrors..."
-        # Quick Iran Repo Fix
         if grep -q "ubuntu" /etc/os-release; then
              sed -i 's|http://archive.ubuntu.com|http://mirror.iranserver.com|g' /etc/apt/sources.list
              apt-get update
@@ -97,17 +99,45 @@ install_dependencies() {
 detect_network() {
     print_info "Detecting network..."
     IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
-    PUBLIC_IP=$(curl -4 -s --max-time 3 ifconfig.me)
+    
+    # --- ROBUST IP DETECTION ---
+    PUBLIC_IP=""
+    SERVICES=("http://ipv4.icanhazip.com" "http://api.ipify.org" "http://ifconfig.me/ip" "http://ipecho.net/plain")
+    
+    for SERVICE in "${SERVICES[@]}"; do
+        TEMP_IP=$(curl -s --max-time 3 "$SERVICE")
+        # Validate IP format
+        if [[ "$TEMP_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            PUBLIC_IP="$TEMP_IP"
+            break
+        fi
+    done
+
+    # Manual Fallback
+    if [ -z "$PUBLIC_IP" ]; then
+        print_warn "Could not auto-detect Public IP (403 Forbidden)."
+        read -p ">>> Please enter this server's Public IP manually: " PUBLIC_IP
+    fi
+    # ---------------------------
+
     GATEWAY_IP=$(ip r | grep default | awk '{print $3}' | head -n 1)
     
+    # Ping to populate ARP
     ping -c 1 -W 1 $GATEWAY_IP >/dev/null 2>&1
-    GATEWAY_MAC=$(ip neigh show $GATEWAY_IP | awk '{print $5}' | head -n 1)
     
+    # Try ip neigh first, then arp
+    GATEWAY_MAC=$(ip neigh show $GATEWAY_IP | awk '{print $5}' | head -n 1)
     if [ -z "$GATEWAY_MAC" ] && command -v arp >/dev/null; then
          GATEWAY_MAC=$(arp -an $GATEWAY_IP | awk '{print $4}' | head -n 1)
     fi
 
     if [ -z "$IFACE" ]; then print_error "Network detection failed."; fi
+    
+    # Final Validation
+    if [[ ! "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+         print_error "Invalid IP: $PUBLIC_IP"
+    fi
+
     print_success "IP: $PUBLIC_IP | Iface: $IFACE | GW: $GATEWAY_MAC"
 }
 
@@ -115,6 +145,7 @@ setup_firewall() {
     local target=$1; local port=$2; local mode=$3
     print_info "Configuring Firewall..."
     
+    # Clean old
     iptables -t raw -D PREROUTING -p tcp --dport $port -j NOTRACK 2>/dev/null
     iptables -t raw -D OUTPUT -p tcp --sport $port -j NOTRACK 2>/dev/null
     
@@ -131,6 +162,7 @@ setup_firewall() {
         iptables -t mangle -A OUTPUT -p tcp -d $target --dport $port --tcp-flags RST RST -j DROP
     fi
     iptables -t mangle -A OUTPUT -p tcp --sport $port --tcp-flags RST RST -j DROP
+    
     if command -v netfilter-persistent >/dev/null; then netfilter-persistent save >/dev/null 2>&1; fi
 }
 
@@ -140,6 +172,7 @@ install_paqet() {
     get_file "Paqet Binary" "$PAQET_URL" "paqet.tar.gz"
     
     tar -xzf paqet.tar.gz
+    # Fix filename variations
     if [ -f "paqet_linux_amd64" ]; then mv paqet_linux_amd64 paqet; fi
     if [ -f "paqet-linux-amd64" ]; then mv paqet-linux-amd64 paqet; fi
     chmod +x paqet
@@ -147,7 +180,9 @@ install_paqet() {
 
 install_xui_custom() {
     echo ""
-    read -p ">>> Install 3X-UI Panel? [y/N]: " install_xui
+    read -p ">>> Install 3X-UI Panel? [Y/n]: " install_xui
+    install_xui=${install_xui:-y}
+    
     if [[ ! "$install_xui" =~ ^[Yy]$ ]]; then return; fi
 
     cd /root
@@ -165,7 +200,9 @@ install_xui_custom() {
     fi
 
     # Swap Core Option
-    read -p ">>> Swap Xray Core to GFW-Knocker (Better Reality)? [y/N]: " swap_core
+    read -p ">>> Swap Xray Core to GFW-Knocker? [Y/n]: " swap_core
+    swap_core=${swap_core:-y}
+    
     if [[ "$swap_core" =~ ^[Yy]$ ]]; then
         get_file "GFW-Knocker Core" "$CORE_URL" "xray.zip"
         unzip -o xray.zip -d xray_temp
@@ -183,11 +220,15 @@ check_tunnel() {
     local remote_ip=$1
     print_info "Verifying Tunnel..."
     sleep 3
-    DETECTED_IP=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 http://ifconfig.me)
+    # Try to fetch IP via Socks Proxy
+    DETECTED_IP=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 http://api.ipify.org)
+    
     if [ "$DETECTED_IP" == "$remote_ip" ]; then
         print_success "TUNNEL SUCCESS! Exit IP: $DETECTED_IP"
+    elif [[ "$DETECTED_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        print_warn "Tunnel OK but IP differs: $DETECTED_IP (Cloudflare?)"
     else
-        print_warn "Tunnel check: $DETECTED_IP (Expected $remote_ip)"
+        print_warn "Tunnel Check Failed. Curl Output: '$DETECTED_IP'"
     fi
 }
 
@@ -195,7 +236,7 @@ check_tunnel() {
 check_root
 clear
 echo "=========================================================="
-echo "    ULTIMATE PAQET SETUP (File Upload Support)           "
+echo "    ULTIMATE PAQET SETUP (Robust & Fixed)                "
 echo "=========================================================="
 echo "1) KHAREJ (Germany)"
 echo "2) IRAN (Client)"
@@ -296,6 +337,7 @@ EOF
     
     echo "=========================================================="
     echo "SETUP COMPLETE."
-    echo "If you installed X-UI, configure Outbounds to SOCKS 127.0.0.1:1080"
+    echo "1. Panel: http://$PUBLIC_IP:2053 (admin/admin)"
+    echo "2. Configure Outbounds: SOCKS -> 127.0.0.1:1080"
     echo "=========================================================="
 fi
