@@ -27,6 +27,23 @@ check_root() {
     fi
 }
 
+install_dependencies() {
+    print_info "Installing dependencies..."
+    # Suppress errors if apt fails (common in Iran), try to continue
+    apt-get update -qq || print_warn "Apt update timed out or failed. Attempting to continue..."
+    
+    # ADDED net-tools here to fix the 'arp: command not found' error
+    DEPS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools"
+    
+    apt-get install -y $DEPS
+    
+    if [ $? -ne 0 ]; then
+        print_warn "Standard install failed. Trying to fix broken packages..."
+        apt-get --fix-broken install -y
+        apt-get install -y $DEPS
+    fi
+}
+
 detect_network() {
     print_info "Detecting network details..."
     
@@ -42,29 +59,24 @@ detect_network() {
     # 3. Detect Gateway
     GATEWAY_IP=$(ip r | grep default | awk '{print $3}' | head -n 1)
     
-    # 4. Detect Gateway MAC (Ping first to ensure ARP entry exists)
+    # 4. Detect Gateway MAC
+    # Ping first to ensure ARP entry exists
     ping -c 1 -W 1 $GATEWAY_IP >/dev/null 2>&1
-    GATEWAY_MAC=$(arp -an $GATEWAY_IP | awk '{print $4}' | head -n 1)
+    
+    # Try using ARP (net-tools)
+    if command -v arp >/dev/null 2>&1; then
+        GATEWAY_MAC=$(arp -an $GATEWAY_IP | awk '{print $4}' | head -n 1)
+    fi
+
+    # Fallback to 'ip neigh' if ARP failed or is missing
+    if [ -z "$GATEWAY_MAC" ]; then
+        GATEWAY_MAC=$(ip neigh show $GATEWAY_IP | awk '{print $5}' | head -n 1)
+    fi
 
     if [ -z "$IFACE" ] || [ -z "$GATEWAY_MAC" ]; then
-        print_error "Could not detect Interface or Gateway MAC. Please check internet connection."
+        print_error "Could not detect Interface or Gateway MAC. \nDEBUG: IP=$PUBLIC_IP, GW=$GATEWAY_IP. Please check internet connection."
     fi
     print_success "Detected: IP=$PUBLIC_IP | Iface=$IFACE | GW MAC=$GATEWAY_MAC"
-}
-
-install_dependencies() {
-    print_info "Installing dependencies..."
-    # Suppress errors if apt fails (common in Iran), try to continue
-    apt-get update -qq || print_warn "Apt update timed out or failed. Attempting to continue..."
-    
-    DEPS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl"
-    apt-get install -y $DEPS
-    
-    if [ $? -ne 0 ]; then
-        print_warn "Standard install failed. Trying to fix broken packages..."
-        apt-get --fix-broken install -y
-        apt-get install -y $DEPS
-    fi
 }
 
 setup_firewall_bypass() {
