@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # =========================================================
-#  ROBUST SETUP: PAQET TUNNEL + X-UI (GFW-Knocker Core)
+#  CORRECTED SETUP: PAQET (Hanselime) + X-UI (GFW-Knocker)
 # =========================================================
 
 # --- GLOBAL CONFIG ---
-# Using Alpha 12 because it is known stable. Alpha 14 link was failing.
-PAQET_URL="https://github.com/enfein/paqet/releases/download/v1.0.0-alpha.12/paqet-linux-amd64-v1.0.0-alpha.12.tar.gz"
+# CORRECTED URL: Using 'hanselime' repo instead of 'enfein'
+PAQET_URL="https://github.com/hanselime/paqet/releases/download/v1.0.0-alpha.14/paqet-linux-amd64-v1.0.0-alpha.14.tar.gz"
 XUI_URL="https://biaupload.com/do.php?filename=org-c52c22f2ee231.gz"
 GFW_KNOCKER_URL="https://github.com/GFW-knocker/Xray-core/releases/download/v1.8.24/Xray-linux-64.zip"
 
@@ -15,10 +15,9 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # --- HELPER FUNCTIONS ---
-
 print_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 print_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 print_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -31,10 +30,10 @@ check_root() {
 }
 
 wait_for_apt() {
-    # Loops until the apt lock is released
+    # Fix for 'Could not get lock' error
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 ; do
-        print_warn "Waiting for other software managers to finish..."
-        sleep 5
+        print_warn "Waiting for apt lock to release..."
+        sleep 3
     done
 }
 
@@ -42,22 +41,21 @@ install_dependencies() {
     print_info "Installing dependencies..."
     wait_for_apt
     
-    # Try to enable universe repo if packages are missing (Fixes iptables-persistent error)
+    # Fix for missing iptables-persistent on some minimal Ubuntu images
     if ! apt-cache policy | grep -q "universe"; then
         apt-get install -y software-properties-common
         add-apt-repository universe -y
         apt-get update -qq
     fi
 
-    # Suppress errors if apt fails (common in Iran), try to continue
-    apt-get update -qq || print_warn "Apt update timed out or failed. Attempting to continue..."
-    
+    # Added 'unzip' and 'net-tools' to fix previous errors
     DEPS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip"
     
+    apt-get update -qq
     apt-get install -y $DEPS
     
     if [ $? -ne 0 ]; then
-        print_warn "Standard install failed. Trying to fix broken packages..."
+        print_warn "Standard install failed. Attempting fix..."
         apt-get --fix-broken install -y
         apt-get install -y $DEPS
     fi
@@ -66,29 +64,28 @@ install_dependencies() {
 detect_network() {
     print_info "Detecting network details..."
     
-    # 1. Detect Interface
+    # Robust Interface Detection
     IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
     
-    # 2. Detect Public IP
+    # Robust IP Detection
     PUBLIC_IP=$(curl -4 -s --max-time 5 icanhazip.com)
-    if [ -z "$PUBLIC_IP" ]; then
-        PUBLIC_IP=$(curl -4 -s --max-time 5 ifconfig.me)
-    fi
+    [ -z "$PUBLIC_IP" ] && PUBLIC_IP=$(curl -4 -s --max-time 5 ifconfig.me)
     
-    # 3. Detect Gateway
+    # Robust Gateway Detection
     GATEWAY_IP=$(ip r | grep default | awk '{print $3}' | head -n 1)
     
-    # 4. Detect Gateway MAC
+    # Robust MAC Detection (Ping first to ensure ARP table is populated)
     ping -c 1 -W 1 $GATEWAY_IP >/dev/null 2>&1
     if command -v arp >/dev/null 2>&1; then
         GATEWAY_MAC=$(arp -an $GATEWAY_IP | awk '{print $4}' | head -n 1)
     fi
+    # Fallback to ip neigh if arp command failed
     if [ -z "$GATEWAY_MAC" ]; then
         GATEWAY_MAC=$(ip neigh show $GATEWAY_IP | awk '{print $5}' | head -n 1)
     fi
 
     if [ -z "$IFACE" ] || [ -z "$GATEWAY_MAC" ]; then
-        print_error "Could not detect Interface or Gateway MAC. \nDEBUG: IP=$PUBLIC_IP, GW=$GATEWAY_IP. Please check internet connection."
+        print_error "Network detection failed. \nDEBUG: IP=$PUBLIC_IP, GW=$GATEWAY_IP. Check internet connection."
     fi
     print_success "Detected: IP=$PUBLIC_IP | Iface=$IFACE | GW MAC=$GATEWAY_MAC"
 }
@@ -105,28 +102,24 @@ setup_firewall_bypass() {
     iptables -t raw -D OUTPUT -p tcp --sport $port -j NOTRACK 2>/dev/null
     
     if [ "$mode" == "server" ]; then
-        # SERVER RULES
         iptables -t raw -A PREROUTING -p tcp --dport $port -j NOTRACK
         iptables -t raw -A OUTPUT -p tcp --sport $port -j NOTRACK
         iptables -t filter -A INPUT -p tcp --dport $port -j ACCEPT
         iptables -t filter -A OUTPUT -p tcp --sport $port -j ACCEPT
     else
-        # CLIENT RULES (Iran)
-        iptables -t raw -D OUTPUT -p tcp -d $target_ip --dport $port -j NOTRACK 2>/dev/null
-        iptables -t raw -D PREROUTING -p tcp -s $target_ip --sport $port -j NOTRACK 2>/dev/null
-        
         iptables -t raw -A OUTPUT -p tcp -d $target_ip --dport $port -j NOTRACK
         iptables -t raw -A PREROUTING -p tcp -s $target_ip --sport $port -j NOTRACK
         iptables -t filter -A OUTPUT -p tcp -d $target_ip --dport $port -j ACCEPT
         iptables -t filter -A INPUT -p tcp -s $target_ip --sport $port -j ACCEPT
     fi
     
+    # Prevent RST packets
     iptables -t mangle -A OUTPUT -p tcp --sport $port --tcp-flags RST RST -j DROP 2>/dev/null
     if [ "$mode" == "client" ]; then
          iptables -t mangle -A OUTPUT -p tcp -d $target_ip --dport $port --tcp-flags RST RST -j DROP 2>/dev/null
     fi
 
-    # Try to save, ignore if command missing (common in Docker/LXC)
+    # Save if possible
     if command -v netfilter-persistent >/dev/null; then
         netfilter-persistent save >/dev/null 2>&1
     fi
@@ -134,110 +127,91 @@ setup_firewall_bypass() {
 
 install_paqet() {
     cd /root
-    # Always check if download is needed to avoid overwriting working setup
-    if [ ! -f "paqet" ]; then
-        print_info "Downloading Paqet..."
-        rm -f paqet.tar.gz
-        wget -q -O paqet.tar.gz "$PAQET_URL"
-        
-        if [ ! -s paqet.tar.gz ]; then
-            print_error "Download failed or file is empty. Check URL."
-        fi
-
-        tar -xzf paqet.tar.gz
-        
-        # Handle different naming conventions in tar files
-        if [ -f "paqet_linux_amd64" ]; then
-            mv paqet_linux_amd64 paqet
-        elif [ -f "paqet-linux-amd64" ]; then
-            mv paqet-linux-amd64 paqet
-        fi
-
-        chmod +x paqet
-        rm paqet.tar.gz
-    else
-        print_success "Paqet binary already exists. Skipping download."
+    print_info "Downloading Paqet (Hanselime Alpha 14)..."
+    rm -f paqet.tar.gz paqet
+    
+    wget -q -O paqet.tar.gz "$PAQET_URL"
+    
+    if [ ! -s paqet.tar.gz ]; then
+        print_error "Download failed. The URL might be blocked or changed."
     fi
+
+    tar -xzf paqet.tar.gz
+    
+    # Fix filename variations
+    if [ -f "paqet_linux_amd64" ]; then mv paqet_linux_amd64 paqet; fi
+    if [ -f "paqet-linux-amd64" ]; then mv paqet-linux-amd64 paqet; fi
+
+    chmod +x paqet
+    print_success "Paqet Installed."
 }
 
 install_xui_gfw_knocker() {
-    print_info "Installing 3X-UI Panel..."
+    print_info "Installing 3X-UI with GFW-Knocker Core..."
     
-    ARCH=$(uname -m)
-    case "${ARCH}" in
-        x86_64 | x64 | amd64) XUI_ARCH="amd64" ;;
-        *) XUI_ARCH="amd64" ;; # Defaulting to amd64 for simplicity
-    esac
-
     cd /root/
-    wget -q -O x-ui-linux-${XUI_ARCH}.tar.gz "$XUI_URL"
-    rm -rf x-ui/ /usr/local/x-ui/ /usr/bin/x-ui
-    tar zxvf x-ui-linux-${XUI_ARCH}.tar.gz > /dev/null
+    wget -q -O x-ui.tar.gz "$XUI_URL"
+    tar zxf x-ui.tar.gz > /dev/null
+    rm -rf /usr/local/x-ui
+    mv x-ui /usr/local/
     
-    chmod +x x-ui/x-ui x-ui/bin/xray-linux-* x-ui/x-ui.sh
-    cp x-ui/x-ui.sh /usr/bin/x-ui
-
-    if [ -f "x-ui/x-ui.service" ]; then
-        cp -f x-ui/x-ui.service /etc/systemd/system/
+    chmod +x /usr/local/x-ui/x-ui /usr/local/x-ui/bin/xray-linux-* /usr/local/x-ui/x-ui.sh
+    cp /usr/local/x-ui/x-ui.sh /usr/bin/x-ui
+    
+    # Install Service
+    if [ -f "/usr/local/x-ui/x-ui.service" ]; then
+        cp /usr/local/x-ui/x-ui.service /etc/systemd/system/
     else
         curl -fLo /etc/systemd/system/x-ui.service https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.debian
     fi
 
-    mv x-ui/ /usr/local/
-    
     # --- SWAP CORE TO GFW-KNOCKER ---
-    print_info "Replacing Xray Core with GFW-Knocker version..."
-    cd /tmp
-    wget -q -O Xray-linux-64.zip "$GFW_KNOCKER_URL"
-    unzip -o Xray-linux-64.zip > /dev/null
-    mv xray /usr/local/x-ui/bin/xray-linux-amd64
+    print_info "Swapping to GFW-Knocker Xray Core..."
+    wget -q -O xray.zip "$GFW_KNOCKER_URL"
+    unzip -o xray.zip -d xray_temp > /dev/null
+    mv xray_temp/xray /usr/local/x-ui/bin/xray-linux-amd64
     chmod +x /usr/local/x-ui/bin/xray-linux-amd64
-    rm Xray-linux-64.zip
+    rm -rf xray.zip xray_temp
     # --------------------------------
 
     systemctl daemon-reload
     systemctl enable x-ui
     systemctl restart x-ui
-    
-    print_success "3X-UI Installed with GFW-Knocker Core."
+    print_success "X-UI Ready."
 }
 
-check_tunnel_connection() {
-    print_info "Verifying Tunnel Connectivity..."
-    sleep 5 # Wait for service to start
+check_tunnel() {
+    print_info "Testing Tunnel..."
+    sleep 5
+    # Check if we can reach Google via the local SOCKS proxy
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname 127.0.0.1:1080 https://www.google.com)
     
-    # Try connecting through the SOCKS proxy
-    RESULT=$(curl -s --socks5-hostname 127.0.0.1:1080 -m 10 https://api.ipify.org)
-    
-    if [[ "$RESULT" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        print_success "Tunnel Verification SUCCESS! Remote IP seen: $RESULT"
+    if [ "$HTTP_CODE" == "200" ] || [ "$HTTP_CODE" == "301" ]; then
+        print_success "TUNNEL IS WORKING! (Google reachable)"
     else
-        print_warn "Tunnel Verification FAILED. Curl output: $RESULT"
-        print_warn "Check if the Kharej server IP and Key match exactly."
+        print_warn "Tunnel Test Failed (HTTP Code: $HTTP_CODE). Check your IP and Key."
     fi
 }
 
-# --- MAIN SCRIPT EXECUTION ---
+# --- MAIN LOGIC ---
 
 check_root
 clear
 echo "=========================================================="
-echo "         PAQET TUNNEL + Xray AUTO INSTALLER              "
+echo "      PAQET (Hanselime) + XRAY AUTO INSTALLER            "
 echo "=========================================================="
-echo "1) SETUP KHAREJ SERVER (The Exit)"
-echo "2) SETUP IRAN SERVER (The Client)"
+echo "1) SETUP KHAREJ SERVER (Germany/Outside)"
+echo "2) SETUP IRAN SERVER (Client)"
 echo "=========================================================="
 read -p "Select [1 or 2]: " ROLE
 
 if [ "$ROLE" == "1" ]; then
-    # === KHAREJ SERVER FLOW ===
     install_dependencies
     detect_network
     
     echo ""
-    read -p "Enter Paqet Port [Press Enter for 8880]: " PORT
+    read -p "Enter Paqet Port [Default 8880]: " PORT
     PORT=${PORT:-8880}
-    
     KEY=$(openssl rand -hex 16)
     
     install_paqet
@@ -281,31 +255,27 @@ EOF
     systemctl restart paqet
     
     echo ""
-    echo "=========================================================="
-    print_success "KHAREJ SERVER SETUP COMPLETE!"
+    print_success "SETUP COMPLETE!"
     echo "----------------------------------------------------------"
-    echo "COPY THESE VALUES FOR YOUR IRAN SERVER INPUT:"
+    echo "USE THESE ON IRAN SERVER:"
+    echo -e "IP:   ${GREEN}$PUBLIC_IP${NC}"
+    echo -e "PORT: ${GREEN}$PORT${NC}"
+    echo -e "KEY:  ${GREEN}$KEY${NC}"
     echo "----------------------------------------------------------"
-    echo -e "Server IP:   ${GREEN}$PUBLIC_IP${NC}"
-    echo -e "Tunnel Port: ${GREEN}$PORT${NC}"
-    echo -e "Secret Key:  ${GREEN}$KEY${NC}"
-    echo "=========================================================="
 
 elif [ "$ROLE" == "2" ]; then
-    # === IRAN CLIENT FLOW ===
     install_dependencies
     detect_network
     
     echo ""
-    echo ">>> Please enter details from the KHAREJ Server:"
-    read -p "KHAREJ IP: " REMOTE_IP
-    read -p "Tunnel Port [Default 8880]: " REMOTE_PORT
+    echo ">>> Enter details from Kharej Server:"
+    read -p "IP: " REMOTE_IP
+    read -p "PORT [8880]: " REMOTE_PORT
     REMOTE_PORT=${REMOTE_PORT:-8880}
-    read -p "Secret Key: " KEY
+    read -p "KEY: " KEY
     
-    if [ -z "$REMOTE_IP" ] || [ -z "$KEY" ]; then
-        print_error "IP and Key are required!"
-    fi
+    [ -z "$REMOTE_IP" ] && print_error "IP Required"
+    [ -z "$KEY" ] && print_error "Key Required"
     
     install_paqet
     setup_firewall_bypass "$REMOTE_IP" "$REMOTE_PORT" "client"
@@ -349,24 +319,19 @@ EOF
     systemctl enable paqet
     systemctl restart paqet
     
-    print_success "Paqet Tunnel Started."
-    
-    # Check if Tunnel Works
-    check_tunnel_connection
-
-    # Install X-UI and Swap Core
+    print_info "Paqet Started. Installing X-UI..."
     install_xui_gfw_knocker
     
-    # Generate random UUID for user convenience
+    check_tunnel
+    
+    # Configure Outbound
     VLESS_UUID=$(cat /proc/sys/kernel/random/uuid)
     
     echo "=========================================================="
-    echo "              FINAL CONFIGURATION REQUIRED                "
-    echo "=========================================================="
-    echo -e "1. Open X-UI Panel: ${GREEN}http://$PUBLIC_IP:2053${NC}"
-    echo -e "2. Default Login:   ${GREEN}admin / admin${NC}"
-    echo "3. Go to 'Settings' -> 'Xray Configuration Template'"
-    echo "4. DELETE the 'outbounds' section and PASTE this:"
+    echo -e "1. Open X-UI: ${GREEN}http://$PUBLIC_IP:2053${NC}"
+    echo -e "2. Login:     ${GREEN}admin / admin${NC}"
+    echo "3. Go to Settings -> Xray Configuration Template"
+    echo "4. REPLACE 'outbounds' with:"
     echo -e "${BLUE}"
     cat <<EOF
 "outbounds": [
@@ -375,15 +340,9 @@ EOF
 ]
 EOF
     echo -e "${NC}"
-    echo "5. Click SAVE and RESTART XRAY."
-    echo "----------------------------------------------------------"
-    echo "SUGGESTED VMESS/VLESS SETUP (Create in Inbounds):"
-    echo "Remark:  Tunnel"
-    echo "Port:    443"
-    echo "Network: TCP"
-    echo "UUID:    $VLESS_UUID"
+    echo "5. Create Inbound: Port 443 | TCP | Reality | UUID: $VLESS_UUID"
     echo "=========================================================="
 
 else
-    print_error "Invalid Choice. Run script again."
+    print_error "Invalid selection."
 fi
