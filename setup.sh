@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  PAQET SIMPLE TUNNEL V3: VERIFIED CONNECTION
+#  PAQET SIMPLE TUNNEL V4.1: ROBUST INSTALLER
 # =========================================================
 
 # --- CONFIGURATION ---
@@ -29,22 +29,32 @@ check_root() { if [ "$EUID" -ne 0 ]; then print_error "Please run as root"; fi; 
 # --- DOWNLOADER ---
 get_file() {
     local name=$1; local url=$2; local dest=$3
+    
+    # Ensure destination directory exists
+    mkdir -p "$(dirname "$dest")"
+
     echo ""
     echo -e "${YELLOW}>>> Source for $name?${NC}"
     echo "   1) Download from Internet (Default)"
-    echo "   2) Use Local File (I uploaded it)"
+    echo "   2) Use Local File"
     read -p "   Select [1-2] (Enter=1): " choice
     choice=${choice:-1}
 
     if [ "$choice" == "2" ]; then
         while true; do
             read -p "   Enter full path to file: " localpath
+            # Check if file exists
             if [ -f "$localpath" ]; then
+                print_info "Copying $localpath to $dest..."
                 cp "$localpath" "$dest"
-                print_success "Loaded $name from local file."
-                return 0
+                if [ -s "$dest" ]; then
+                    print_success "Loaded $name from local file."
+                    return 0
+                else
+                    print_error "Copy failed. Destination file empty."
+                fi
             else
-                print_warn "File not found. Try again."
+                print_warn "File not found at '$localpath'. Try again."
             fi
         done
     else
@@ -176,7 +186,7 @@ verify_paqet_client() {
     
     if [ -z "$TUNNEL_IP" ]; then
         print_error "Verification Failed! Could not connect to internet via tunnel."
-        return 1
+        # Don't return error, just warn, so script finishes display
     elif [ "$TUNNEL_IP" == "$PUBLIC_IP" ]; then
         print_warn "Connected, but IP is same as local ($TUNNEL_IP). Tunnel might not be routing correctly."
     else
@@ -205,15 +215,47 @@ setup_iran_xray() {
         print_info "Installing X-UI..."
         cd /root
         get_file "X-UI Panel" "$XUI_URL" "x-ui.tar.gz"
+        
+        # Clean Install
+        systemctl stop x-ui >/dev/null 2>&1
+        rm -rf /usr/local/x-ui
         tar zxf x-ui.tar.gz
         mv x-ui /usr/local/
-        /usr/local/x-ui/x-ui install
+        chmod +x /usr/local/x-ui/x-ui
         
-        print_info "Configuring X-UI Database..."
-        sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '[{\"tag\":\"proxy\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"127.0.0.1\",\"port\":1080}]}},{\"tag\":\"direct\",\"protocol\":\"freedom\",\"settings\":{}}]' WHERE key = 'xrayTemplateConfig';"
-        sqlite3 /etc/x-ui/x-ui.db "INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, client_stats, tag, protocol, port, settings, stream_settings, sniffing, listen) VALUES (1, 0, 0, 0, 'Paqet-VMess', 1, 0, 0, 'vmess_auto', 'vmess', $RAND_PORT, '{\"clients\": [{\"id\": \"$UUID\", \"alterId\": 0, \"email\": \"paqet_user\"}]}', '{\"network\": \"tcp\"}', '{\"enabled\": true}', '');"
+        # Manually create Service (Robust method)
+        cat <<EOF > /etc/systemd/system/x-ui.service
+[Unit]
+Description=X-UI Service
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/x-ui
+ExecStart=/usr/local/x-ui/x-ui
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
         
-        systemctl restart x-ui
+        # Initialize DB: Create dir, Start service to gen DB, Stop service
+        mkdir -p /etc/x-ui
+        print_info "Initializing Database..."
+        systemctl start x-ui
+        sleep 5
+        systemctl stop x-ui
+        
+        # Check DB Exists
+        if [ ! -f /etc/x-ui/x-ui.db ]; then
+            print_error "Database creation failed. X-UI might not have started correctly."
+        else
+            print_info "Configuring X-UI Database..."
+            sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '[{\"tag\":\"proxy\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"127.0.0.1\",\"port\":1080}]}},{\"tag\":\"direct\",\"protocol\":\"freedom\",\"settings\":{}}]' WHERE key = 'xrayTemplateConfig';"
+            sqlite3 /etc/x-ui/x-ui.db "INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, client_stats, tag, protocol, port, settings, stream_settings, sniffing, listen) VALUES (1, 0, 0, 0, 'Paqet-VMess', 1, 0, 0, 'vmess_auto', 'vmess', $RAND_PORT, '{\"clients\": [{\"id\": \"$UUID\", \"alterId\": 0, \"email\": \"paqet_user\"}]}', '{\"network\": \"tcp\"}', '{\"enabled\": true}', '');"
+            systemctl start x-ui
+            print_success "X-UI Configured & Started."
+        fi
         
     elif [ "$XCHOICE" == "2" ]; then
         # --- CORE ONLY ---
@@ -259,9 +301,10 @@ EOF
     echo -e "${GREEN}      IRAN SETUP COMPLETE               ${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    # Run Verification Here
+    # Run Verification
     verify_paqet_client
     echo "----------------------------------------"
+    echo -e "1. Paqet Tunnel: Connected to Kharej"
     
     if [ "$XCHOICE" != "3" ]; then
         VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Iran\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
@@ -270,8 +313,8 @@ EOF
         echo -e "3. VMess Link:"
         echo -e "${CYAN}$VMESS_LINK${NC}"
     else
-        echo -e "1. Xray Bridge:  ${YELLOW}Use your existing Panel${NC}"
-        echo -e "2. Config Info:  Set your Outbound to ${CYAN}SOCKS5 127.0.0.1:1080${NC}"
+        echo -e "2. Xray Bridge:  ${YELLOW}Use your existing Panel${NC}"
+        echo -e "3. Config Info:  Set your Outbound to ${CYAN}SOCKS5 127.0.0.1:1080${NC}"
     fi
     echo -e "${GREEN}========================================${NC}"
 }
@@ -282,7 +325,7 @@ EOF
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge)           ${NC}"
+echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge2)           ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (Tunnel Exit)"
 echo "2) Iran Server   (Tunnel Entry + Bridge)"
