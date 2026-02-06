@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  PAQET SIMPLE TUNNEL V4.1: ROBUST INSTALLER
+#  PAQET SIMPLE TUNNEL V4.2: X-UI COMMAND FIX
 # =========================================================
 
 # --- CONFIGURATION ---
@@ -29,10 +29,7 @@ check_root() { if [ "$EUID" -ne 0 ]; then print_error "Please run as root"; fi; 
 # --- DOWNLOADER ---
 get_file() {
     local name=$1; local url=$2; local dest=$3
-    
-    # Ensure destination directory exists
     mkdir -p "$(dirname "$dest")"
-
     echo ""
     echo -e "${YELLOW}>>> Source for $name?${NC}"
     echo "   1) Download from Internet (Default)"
@@ -43,25 +40,21 @@ get_file() {
     if [ "$choice" == "2" ]; then
         while true; do
             read -p "   Enter full path to file: " localpath
-            # Check if file exists
             if [ -f "$localpath" ]; then
-                print_info "Copying $localpath to $dest..."
                 cp "$localpath" "$dest"
                 if [ -s "$dest" ]; then
                     print_success "Loaded $name from local file."
                     return 0
-                else
-                    print_error "Copy failed. Destination file empty."
                 fi
             else
-                print_warn "File not found at '$localpath'. Try again."
+                print_warn "File not found. Try again."
             fi
         done
     else
         print_info "Downloading $name..."
         rm -f "$dest"
         if curl -L --progress-bar --retry 3 --connect-timeout 20 -o "$dest" "$url"; then
-            if [ -s "$dest" ] && [ $(stat -c%s "$dest") -gt 1000 ]; then
+            if [ -s "$dest" ]; then
                 print_success "Download complete."
                 return 0
             else
@@ -77,9 +70,7 @@ get_file() {
 install_dependencies() {
     print_info "Installing Dependencies..."
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
-
     PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip sqlite3 jq bc"
-    
     if ! apt-get install -y $PKGS; then
         print_warn "Apt failed. Switching to Iran mirrors..."
         if grep -q "ubuntu" /etc/os-release; then
@@ -104,12 +95,10 @@ detect_ip() {
         PUBLIC_IP=$(ip -4 addr show $DEF_IFACE | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
     fi
     [ -z "$PUBLIC_IP" ] && read -p ">>> Enter Public IP Manually: " PUBLIC_IP
-    
     IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
     GW_IP=$(ip route get 8.8.8.8 | awk '{print $3}')
     GW_MAC=$(ip neigh show $GW_IP | awk '{print $5}' | head -n1)
     [ -z "$GW_MAC" ] && ping -c 1 $GW_IP >/dev/null && GW_MAC=$(ip neigh show $GW_IP | awk '{print $5}' | head -n1)
-    
     print_success "IP: $PUBLIC_IP | IF: $IFACE"
 }
 
@@ -135,7 +124,6 @@ setup_paqet() {
         [ -f "paqet-linux-amd64" ] && mv paqet-linux-amd64 paqet
         chmod +x paqet
     fi
-    
     setup_firewall_bypass "$PAQET_PORT"
 
     if [ "$ROLE" == "server" ]; then
@@ -170,7 +158,6 @@ Restart=always
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload; systemctl enable paqet; systemctl restart paqet
-    
     if [ "$ROLE" == "client" ]; then
         print_info "Waiting for Paqet to initialize..."
         sleep 3
@@ -180,15 +167,11 @@ EOF
 verify_paqet_client() {
     print_info "Verifying Connection..."
     sleep 5
-    
-    # Try fetching IP via local SOCKS proxy (1080)
     TUNNEL_IP=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 http://api.ipify.org)
-    
     if [ -z "$TUNNEL_IP" ]; then
         print_error "Verification Failed! Could not connect to internet via tunnel."
-        # Don't return error, just warn, so script finishes display
     elif [ "$TUNNEL_IP" == "$PUBLIC_IP" ]; then
-        print_warn "Connected, but IP is same as local ($TUNNEL_IP). Tunnel might not be routing correctly."
+        print_warn "Connected, but IP is same as local ($TUNNEL_IP)."
     else
         print_success "TUNNEL CONFIRMED! Traffic exiting via: $TUNNEL_IP"
     fi
@@ -211,19 +194,19 @@ setup_iran_xray() {
     fi
 
     if [ "$XCHOICE" == "1" ]; then
-        # --- X-UI ---
         print_info "Installing X-UI..."
         cd /root
         get_file "X-UI Panel" "$XUI_URL" "x-ui.tar.gz"
-        
-        # Clean Install
         systemctl stop x-ui >/dev/null 2>&1
         rm -rf /usr/local/x-ui
         tar zxf x-ui.tar.gz
         mv x-ui /usr/local/
         chmod +x /usr/local/x-ui/x-ui
         
-        # Manually create Service (Robust method)
+        # --- FIX: CREATE SYMLINK FOR CLI ACCESS ---
+        ln -sf /usr/local/x-ui/x-ui /usr/bin/x-ui
+        
+        # Manually create Service
         cat <<EOF > /etc/systemd/system/x-ui.service
 [Unit]
 Description=X-UI Service
@@ -239,16 +222,15 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         
-        # Initialize DB: Create dir, Start service to gen DB, Stop service
+        # Initialize DB
         mkdir -p /etc/x-ui
         print_info "Initializing Database..."
         systemctl start x-ui
         sleep 5
         systemctl stop x-ui
         
-        # Check DB Exists
         if [ ! -f /etc/x-ui/x-ui.db ]; then
-            print_error "Database creation failed. X-UI might not have started correctly."
+            print_error "Database creation failed. X-UI didn't start."
         else
             print_info "Configuring X-UI Database..."
             sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '[{\"tag\":\"proxy\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"127.0.0.1\",\"port\":1080}]}},{\"tag\":\"direct\",\"protocol\":\"freedom\",\"settings\":{}}]' WHERE key = 'xrayTemplateConfig';"
@@ -258,7 +240,6 @@ EOF
         fi
         
     elif [ "$XCHOICE" == "2" ]; then
-        # --- CORE ONLY ---
         print_info "Installing Xray Core..."
         mkdir -p /usr/local/bin /usr/local/etc/xray
         get_file "Xray Core" "$XRAY_URL" "xray.zip"
@@ -293,19 +274,14 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload; systemctl enable xray; systemctl restart xray
     else
-        print_info "Skipping Xray installation (Using existing setup)."
+        print_info "Skipping Xray installation."
     fi
 
-    # Output based on choice
     echo ""; echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}      IRAN SETUP COMPLETE               ${NC}"
     echo -e "${GREEN}========================================${NC}"
-    
-    # Run Verification
     verify_paqet_client
     echo "----------------------------------------"
-    echo -e "1. Paqet Tunnel: Connected to Kharej"
-    
     if [ "$XCHOICE" != "3" ]; then
         VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Iran\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
         VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
@@ -325,7 +301,7 @@ EOF
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge2)           ${NC}"
+echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge)           ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (Tunnel Exit)"
 echo "2) Iran Server   (Tunnel Entry + Bridge)"
@@ -336,7 +312,6 @@ if [ "$ROLE_NUM" == "1" ]; then ROLE="server"; else ROLE="client"; fi
 install_dependencies
 detect_ip
 
-# --- PORTS ---
 echo ""; echo -e "${CYAN}--- CONFIGURATION ---${NC}"
 read -p "Paqet Port (Press Enter for 8880): " PAQET_PORT; PAQET_PORT=${PAQET_PORT:-8880}
 
