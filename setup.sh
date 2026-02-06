@@ -378,7 +378,7 @@ verify_tunnels() {
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   MASTER DUAL TUNNEL (Paqet + GFW-Knocker)               ${NC}"
+echo -e "${CYAN}   MASTER DUAL TUNNEL (Paqet + GFW-Knocker2)               ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (VPS Outside)"
 echo "2) Iran Server   (VPS Bridge / Client)"
