@@ -1,20 +1,14 @@
 #!/bin/bash
 
 # =========================================================
-#  MASTER TUNNEL V4: SELECTABLE MODES + STRICT CHECKS
+#  PAQET SIMPLE TUNNEL: PAQET + XRAY BRIDGE
 # =========================================================
 
-# --- VERSIONS ---
+# --- CONFIGURATION ---
 PAQET_VERSION="v1.0.0-alpha.14"
-XUI_VERSION="v2.4.4" # Stable MHSanaei version
-XRAY_VERSION="v1.8.24" # Rock-solid stable core
-
-# --- URLs ---
 PAQET_URL="https://github.com/hanselime/paqet/releases/download/${PAQET_VERSION}/paqet-linux-amd64-${PAQET_VERSION}.tar.gz"
-GFK_RAW_URL="https://raw.githubusercontent.com/SamNet-dev/paqctl/main/gfk"
-MICROSOCKS_URL="https://github.com/rofl0r/microsocks/archive/refs/heads/master.tar.gz"
-XUI_URL="https://github.com/MHSanaei/3x-ui/releases/download/${XUI_VERSION}/x-ui-linux-amd64.tar.gz"
-CORE_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+XUI_URL="https://github.com/MHSanaei/3x-ui/releases/download/v2.4.4/x-ui-linux-amd64.tar.gz"
+XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-linux-64.zip"
 
 # Colors
 RED='\033[0;31m'
@@ -32,10 +26,9 @@ print_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 check_root() { if [ "$EUID" -ne 0 ]; then print_error "Please run as root"; fi; }
 
-# --- ROBUST DOWNLOADER ---
+# --- DOWNLOADER ---
 get_file() {
     local name=$1; local url=$2; local dest=$3
-    
     echo ""
     echo -e "${YELLOW}>>> Source for $name?${NC}"
     echo "   1) Download from Internet (Default)"
@@ -51,22 +44,21 @@ get_file() {
                 print_success "Loaded $name from local file."
                 return 0
             else
-                print_warn "File not found at '$localpath'. Try again."
+                print_warn "File not found. Try again."
             fi
         done
     else
         print_info "Downloading $name..."
         rm -f "$dest"
         if curl -L --progress-bar --retry 3 --connect-timeout 20 -o "$dest" "$url"; then
-            FILESIZE=$(stat -c%s "$dest")
-            if [ "$FILESIZE" -lt 1000 ]; then
-                print_error "Download corrupted ($FILESIZE bytes). Try Option 2."
-            else
+            if [ -s "$dest" ] && [ $(stat -c%s "$dest") -gt 1000 ]; then
                 print_success "Download complete."
                 return 0
+            else
+                print_error "Download corrupted. Try Option 2."
             fi
         else
-            print_error "Download Failed! Please check internet or use Option 2."
+            print_error "Download Failed! Check internet or use Option 2."
         fi
     fi
 }
@@ -76,7 +68,8 @@ install_dependencies() {
     print_info "Installing Dependencies..."
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
 
-    PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip sqlite3 jq bc python3 python3-pip python3-venv build-essential"
+    # Removed python/build deps since we removed GFK
+    PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip sqlite3 jq bc"
     
     if ! apt-get install -y $PKGS; then
         print_warn "Apt failed. Switching to Iran mirrors..."
@@ -96,29 +89,19 @@ EOF
 }
 
 detect_ip() {
-    # 1. Get Local Interface IP (The "True" IP)
-    DEF_IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
-    LOCAL_IP=$(ip -4 addr show $DEF_IFACE | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
-
-    # 2. Get Public IP (API)
     PUBLIC_IP=$(curl -s --max-time 3 http://api.ipify.org)
-    
-    # Fallback if API fails
-    if [[ ! "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        PUBLIC_IP="$LOCAL_IP"
+    if [[ ! "$PUBLIC_IP" =~ ^[0-9]+\. ]]; then
+        DEF_IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
+        PUBLIC_IP=$(ip -4 addr show $DEF_IFACE | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
     fi
-
-    if [ -z "$PUBLIC_IP" ]; then
-        print_warn "Could not detect IP."
-        read -p ">>> Enter Public IP Manually: " PUBLIC_IP
-    fi
+    [ -z "$PUBLIC_IP" ] && read -p ">>> Enter Public IP Manually: " PUBLIC_IP
     
-    # Gateway for Raw Sockets
+    IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
     GW_IP=$(ip route get 8.8.8.8 | awk '{print $3}')
     GW_MAC=$(ip neigh show $GW_IP | awk '{print $5}' | head -n1)
     [ -z "$GW_MAC" ] && ping -c 1 $GW_IP >/dev/null && GW_MAC=$(ip neigh show $GW_IP | awk '{print $5}' | head -n1)
     
-    print_success "Public IP: $PUBLIC_IP | Local IP: $LOCAL_IP | IF: $DEF_IFACE"
+    print_success "IP: $PUBLIC_IP | IF: $IFACE"
 }
 
 setup_firewall_bypass() {
@@ -131,7 +114,7 @@ setup_firewall_bypass() {
 }
 
 # =========================================================
-#  1. PAQET SETUP
+#  PAQET SETUP
 # =========================================================
 setup_paqet() {
     print_info "Setting up Paqet ($PAQET_PORT)..."
@@ -151,7 +134,7 @@ setup_paqet() {
 role: "server"
 log: { level: "info" }
 listen: { addr: ":$PAQET_PORT" }
-network: { interface: "$DEF_IFACE", ipv4: { addr: "$LOCAL_IP:$PAQET_PORT", router_mac: "$GW_MAC" } }
+network: { interface: "$IFACE", ipv4: { addr: "$PUBLIC_IP:$PAQET_PORT", router_mac: "$GW_MAC" } }
 transport: { protocol: "kcp", kcp: { block: "aes", key: "$KEY" } }
 EOF
         CMD="/root/paqet run -c /root/paqet_server.yaml"
@@ -160,7 +143,7 @@ EOF
 role: "client"
 log: { level: "info" }
 socks5: [ { listen: "127.0.0.1:1080" } ]
-network: { interface: "$DEF_IFACE", ipv4: { addr: "$LOCAL_IP:0", router_mac: "$GW_MAC" } }
+network: { interface: "$IFACE", ipv4: { addr: "$PUBLIC_IP:0", router_mac: "$GW_MAC" } }
 server: { addr: "$REMOTE_IP:$PAQET_PORT" }
 transport: { protocol: "kcp", kcp: { block: "aes", key: "$KEY" } }
 EOF
@@ -178,222 +161,100 @@ Restart=always
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload; systemctl enable paqet; systemctl restart paqet
+    
+    if [ "$ROLE" == "client" ]; then
+        # Wait for Paqet to start before installing Xray
+        print_info "Waiting for Paqet to initialize..."
+        sleep 3
+    fi
 }
 
 # =========================================================
-#  2. GFW-KNOCKER SETUP
+#  IRAN-ONLY: XRAY BRIDGE SETUP
 # =========================================================
-setup_gfk() {
-    print_info "Setting up GFW-Knocker ($GFK_VIO_PORT)..."
-    
-    if [ ! -f /root/gfk_env/bin/pip ]; then
-        print_info "Creating Python Env..."
-        rm -rf /root/gfk_env
-        python3 -m venv /root/gfk_env
-        /root/gfk_env/bin/pip install --upgrade pip
-        if ! /root/gfk_env/bin/pip install scapy aioquic cryptography; then
-             print_warn "Pip install failed. Retrying..."
-             /root/gfk_env/bin/pip install scapy aioquic cryptography
-        fi
-    fi
+setup_iran_xray() {
+    echo ""; echo -e "${CYAN}--- BRIDGE CONFIGURATION ---${NC}"
+    echo "1) Install 3X-UI Panel (Visual Management)"
+    echo "2) Install Simple Xray Core (Lightweight)"
+    read -p "Select [1-2]: " XCHOICE
+    XCHOICE=${XCHOICE:-2}
 
-    mkdir -p /root/gfk
-    cd /root/gfk
-    
-    if [ "$ROLE" == "server" ]; then
-        if [ ! -f "mainserver.py" ]; then
-            echo ""; echo -e "${YELLOW}>>> Source for GFK Server Scripts?${NC}"
-            echo "   1) Download from GitHub (Default)"
-            echo "   2) Use Local Files (Upload a ZIP)"
-            read -p "   Select [1-2]: " gfk_choice
-            gfk_choice=${gfk_choice:-1}
-
-            if [ "$gfk_choice" == "2" ]; then
-                read -p "   Path to ZIP: " zpath
-                if [ -f "$zpath" ]; then unzip -o "$zpath" -d /root/gfk; else print_error "File not found"; fi
-            else
-                wget -q "$GFK_RAW_URL/server/mainserver.py"
-                wget -q "$GFK_RAW_URL/server/quic_server.py"
-                wget -q "$GFK_RAW_URL/server/vio_server.py"
-            fi
-        fi
-        openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=gfk" 2>/dev/null
-    else
-        wget -q "$GFK_RAW_URL/client/mainclient.py"
-        wget -q "$GFK_RAW_URL/client/quic_client.py"
-        wget -q "$GFK_RAW_URL/client/vio_client.py"
-        
-        if [ ! -f /usr/local/bin/microsocks ]; then
-            get_file "Microsocks Source" "$MICROSOCKS_URL" "ms.tar.gz"
-            mkdir -p ms_build
-            tar -xzf ms.tar.gz -C ms_build --strip-components=1
-            cd ms_build
-            make >/dev/null 2>&1  # Silenced make
-            mv microsocks /usr/local/bin/
-            cd /root/gfk
-            rm -rf ms_build ms.tar.gz
-        fi
-    fi
-
-    setup_firewall_bypass $GFK_VIO_PORT
-    [ -z "$KEY" ] && KEY=$(openssl rand -hex 8)
-
-    cat <<EOF > /root/gfk/parameters.py
-vps_ip = "${REMOTE_IP:-$PUBLIC_IP}"
-xray_server_ip_address = "127.0.0.1"
-tcp_port_mapping = {14000: 443}
-udp_port_mapping = {}
-vio_tcp_server_port = $GFK_VIO_PORT
-vio_tcp_client_port = 40000
-vio_udp_server_port = 35000
-vio_udp_client_port = 30000
-quic_server_port = $GFK_QUIC_PORT
-quic_client_port = 20000
-quic_local_ip = "127.0.0.1"
-quic_idle_timeout = 86400
-udp_timeout = 300
-quic_mtu = 1420
-quic_verify_cert = False
-quic_max_data = 1073741824
-quic_max_stream_data = 1073741824
-quic_auth_code = "${KEY}"
-quic_cert_filepath = ("/root/gfk/cert.pem", "/root/gfk/key.pem")
-tcp_flags = "AP"
-EOF
-
-    if [ "$ROLE" == "server" ]; then
-        sed -i "s|'python3'|'/root/gfk_env/bin/python'|g" mainserver.py
-        START_CMD="/root/gfk_env/bin/python /root/gfk/mainserver.py"
-        SVC_NAME="gfk-server"
-    else
-        cat <<WRAP > /root/gfk/start_client.sh
-#!/bin/bash
-pkill microsocks
-/usr/local/bin/microsocks -i 127.0.0.1 -p 1081 &
-/root/gfk_env/bin/python /root/gfk/mainclient.py
-WRAP
-        chmod +x /root/gfk/start_client.sh
-        START_CMD="/root/gfk/start_client.sh"
-        SVC_NAME="gfk-client"
-    fi
-
-    cat <<EOF > /etc/systemd/system/${SVC_NAME}.service
-[Unit]
-Description=GFW-Knocker
-After=network.target
-[Service]
-User=root
-WorkingDirectory=/root/gfk
-ExecStart=${START_CMD}
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload; systemctl enable ${SVC_NAME}; systemctl restart ${SVC_NAME}
-}
-
-# --- SERVER OPTIONS ---
-setup_server_options() {
-    echo ""; echo -e "${CYAN}--- XRAY CONFIGURATION ---${NC}"
-    echo "1) Install 3X-UI Panel"
-    echo "2) Install Standalone VMess (Core Only)"
-    echo "3) Skip (Default)"
-    read -p "Select [1-3]: " XCHOICE
-    XCHOICE=${XCHOICE:-3}
+    UUID=$(cat /proc/sys/kernel/random/uuid)
+    RAND_PORT=$(shuf -i 2000-60000 -n 1)
 
     if [ "$XCHOICE" == "1" ]; then
+        # --- X-UI ---
+        print_info "Installing X-UI..."
         cd /root
         get_file "X-UI Panel" "$XUI_URL" "x-ui.tar.gz"
         tar zxf x-ui.tar.gz
         mv x-ui /usr/local/
         /usr/local/x-ui/x-ui install
         
-    elif [ "$XCHOICE" == "2" ]; then
+        # Automate Database Configuration (Inbound + Outbound)
+        print_info "Configuring X-UI Database..."
+        # 1. Set Outbound to SOCKS 127.0.0.1:1080
+        sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '[{\"tag\":\"proxy\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"127.0.0.1\",\"port\":1080}]}},{\"tag\":\"direct\",\"protocol\":\"freedom\",\"settings\":{}}]' WHERE key = 'xrayTemplateConfig';"
+        
+        # 2. Add VMess Inbound
+        SETTINGS="{\"clients\": [{\"id\": \"$UUID\", \"alterId\": 0, \"email\": \"paqet_user\", \"limitIp\": 0, \"totalGB\": 0, \"expiryTime\": 0, \"enable\": true, \"tgId\": \"\", \"subId\": \"\"}], \"disableInsecureEncryption\": false}"
+        STREAM="{\"network\": \"tcp\", \"security\": \"none\", \"tcpSettings\": {\"acceptProxyProtocol\": false, \"header\": {\"type\": \"none\"}}}"
+        SNIFF="{\"enabled\": true, \"destOverride\": [\"http\", \"tls\", \"quic\", \"fakedns\"], \"metadataOnly\": false, \"routeOnly\": false}"
+        
+        sqlite3 /etc/x-ui/x-ui.db "INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, client_stats, tag, protocol, port, settings, stream_settings, sniffing, listen) VALUES (1, 0, 0, 0, 'Paqet-VMess', 1, 0, 0, 'vmess_auto', 'vmess', $RAND_PORT, '$SETTINGS', '$STREAM', '$SNIFF', '');"
+        
+        systemctl restart x-ui
+        
+    else
+        # --- CORE ONLY ---
+        print_info "Installing Xray Core..."
         mkdir -p /usr/local/bin /usr/local/etc/xray
-        get_file "Xray Core" "$CORE_URL" "xray.zip"
+        get_file "Xray Core" "$XRAY_URL" "xray.zip"
         unzip -o xray.zip -d xtmp >/dev/null
         mv xtmp/xray /usr/local/bin/
         chmod +x /usr/local/bin/xray
         rm -rf xtmp xray.zip
         
-        UUID=$(cat /proc/sys/kernel/random/uuid)
+        # Config: Inbound VMess -> Outbound SOCKS(Paqet)
         cat <<EOF > /usr/local/etc/xray/config.json
 {
   "inbounds": [{
-    "port": 443,
-    "listen": "127.0.0.1",
+    "port": $RAND_PORT,
     "protocol": "vmess",
     "settings": { "clients": [{ "id": "$UUID" }] },
     "streamSettings": { "network": "tcp" }
   }],
-  "outbounds": [{ "protocol": "freedom" }]
+  "outbounds": [
+    {
+      "protocol": "socks",
+      "settings": { "servers": [{ "address": "127.0.0.1", "port": 1080 }] }
+    },
+    { "protocol": "freedom", "tag": "direct" }
+  ]
 }
 EOF
-        nohup /usr/local/bin/xray -config /usr/local/etc/xray/config.json >/dev/null 2>&1 &
-        echo ""; echo "VMESS UUID: $UUID"
-        
-    else
-        # If user skips, only install silent core if GFK is active
-        if [ "$INSTALL_GFK" == "y" ]; then
-            echo ""; echo -e "${YELLOW}GFW-Knocker is active. It NEEDS a backend (SOCKS5/VMess) on 127.0.0.1:443.${NC}"
-            read -p "Install minimal Xray Core as GFK target? [Y/n]: " install_silent
-            install_silent=${install_silent:-y}
-            
-            if [[ "$install_silent" =~ ^[Yy]$ ]]; then
-                print_info "Installing Silent Xray Core..."
-                mkdir -p /usr/local/bin /usr/local/etc/xray
-                get_file "Xray Core" "$CORE_URL" "xray.zip"
-                
-                if ! unzip -t xray.zip >/dev/null 2>&1; then
-                    print_error "Downloaded Xray zip is corrupted. Try Option 2 next time."
-                fi
-
-                unzip -o xray.zip -d xtmp >/dev/null
-                mv xtmp/xray /usr/local/bin/
-                chmod +x /usr/local/bin/xray
-                rm -rf xtmp xray.zip
-                
-                cat <<EOF > /usr/local/etc/xray/config.json
-{
-  "inbounds": [{
-    "port": 443,
-    "listen": "127.0.0.1",
-    "protocol": "socks",
-    "settings": { "auth": "noauth", "udp": true }
-  }],
-  "outbounds": [{ "protocol": "freedom" }]
-}
+        cat <<EOF > /etc/systemd/system/xray.service
+[Unit]
+Description=Xray Service
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/xray -config /usr/local/etc/xray/config.json
+Restart=always
+[Install]
+WantedBy=multi-user.target
 EOF
-                nohup /usr/local/bin/xray -config /usr/local/etc/xray/config.json >/dev/null 2>&1 &
-                print_success "Silent Xray Core running on 127.0.0.1:443"
-            fi
-        fi
+        systemctl daemon-reload; systemctl enable xray; systemctl restart xray
     fi
-}
 
-verify_tunnels() {
-    print_info "Verifying Tunnels..."
-    sleep 5
+    # Generate Link
+    VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Iran\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
+    VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
     
-    # 1. PAQET
-    if [ "$INSTALL_PAQET" == "y" ]; then
-        IP1=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 http://api.ipify.org)
-        if [[ -n "$IP1" ]] && [[ "$IP1" != "$LOCAL_IP" ]]; then 
-            print_success "Paqet Tunnel OK! Exit: $IP1"
-        else
-            print_warn "Paqet Failed. IP: $IP1 (Matches Local or Empty)"
-        fi
-    fi
-    
-    # 2. GFK
-    if [ "$INSTALL_GFK" == "y" ]; then
-        IP2=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1081 http://api.ipify.org)
-        if [[ -n "$IP2" ]] && [[ "$IP2" != "$LOCAL_IP" ]]; then 
-            print_success "GFK Tunnel OK! Exit: $IP2"
-        else
-            print_warn "GFK Failed. IP: $IP2 (Matches Local or Empty)"
-        fi
-    fi
+    echo ""; echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}      VMESS CONNECTION LINK             ${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${CYAN}$VMESS_LINK${NC}"
+    echo "----------------------------------------"
 }
 
 # =========================================================
@@ -402,10 +263,10 @@ verify_tunnels() {
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   MASTER TUNNEL INSTALLER (V4)                           ${NC}"
+echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge)           ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
-echo "1) Kharej Server (VPS Outside)"
-echo "2) Iran Server   (VPS Bridge / Client)"
+echo "1) Kharej Server (Tunnel Exit)"
+echo "2) Iran Server   (Tunnel Entry + Bridge)"
 read -p "Select Role [1-2]: " ROLE_NUM
 
 if [ "$ROLE_NUM" == "1" ]; then ROLE="server"; else ROLE="client"; fi
@@ -413,32 +274,9 @@ if [ "$ROLE_NUM" == "1" ]; then ROLE="server"; else ROLE="client"; fi
 install_dependencies
 detect_ip
 
-# --- MODE SELECTION ---
-echo ""; echo -e "${CYAN}--- TUNNEL MODE ---${NC}"
-echo "1) Paqet Only (Default - Recommended)"
-echo "2) Dual Tunnel (Paqet + GFW-Knocker)"
-echo "3) GFW-Knocker Only"
-read -p "Select Mode [1-3]: " MODE_CHOICE
-MODE_CHOICE=${MODE_CHOICE:-1}
-
-INSTALL_PAQET="n"
-INSTALL_GFK="n"
-
-case $MODE_CHOICE in
-    1) INSTALL_PAQET="y" ;;
-    2) INSTALL_PAQET="y"; INSTALL_GFK="y" ;;
-    3) INSTALL_GFK="y" ;;
-esac
-
-# --- PORTS & KEYS ---
+# --- PORTS ---
 echo ""; echo -e "${CYAN}--- CONFIGURATION ---${NC}"
-if [ "$INSTALL_PAQET" == "y" ]; then
-    read -p "Paqet Port (Press Enter for 8880): " PAQET_PORT; PAQET_PORT=${PAQET_PORT:-8880}
-fi
-if [ "$INSTALL_GFK" == "y" ]; then
-    read -p "GFK VIO Port (Press Enter for 45000): " GFK_VIO_PORT; GFK_VIO_PORT=${GFK_VIO_PORT:-45000}
-    read -p "GFK QUIC Port (Press Enter for 25000): " GFK_QUIC_PORT; GFK_QUIC_PORT=${GFK_QUIC_PORT:-25000}
-fi
+read -p "Paqet Port (Press Enter for 8880): " PAQET_PORT; PAQET_PORT=${PAQET_PORT:-8880}
 
 if [ "$ROLE" == "server" ]; then
     KEY=$(openssl rand -hex 16)
@@ -448,29 +286,26 @@ else
     read -p "Secret Key (from Kharej): " KEY
 fi
 
-# --- INSTALLATION ---
-if [ "$INSTALL_PAQET" == "y" ]; then setup_paqet; fi
-if [ "$INSTALL_GFK" == "y" ]; then setup_gfk; fi
+setup_paqet
 
-# --- FINAL STEPS ---
 if [ "$ROLE" == "server" ]; then
-    setup_server_options
     echo ""; echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}      SERVER SETUP COMPLETE             ${NC}"
+    echo -e "${GREEN}      KHAREJ SETUP COMPLETE             ${NC}"
     echo -e "${GREEN}========================================${NC}"
-    echo -e "COPY THESE TO IRAN SERVER:"
+    echo -e "Use these details on Iran Server:"
     echo -e "IP:            ${YELLOW}$PUBLIC_IP${NC}"
-    [ "$INSTALL_PAQET" == "y" ] && echo -e "Paqet Port:    ${YELLOW}$PAQET_PORT${NC}"
-    [ "$INSTALL_GFK" == "y" ] && echo -e "GFK VIO Port:  ${YELLOW}$GFK_VIO_PORT${NC}"
-    [ "$INSTALL_GFK" == "y" ] && echo -e "GFK QUIC Port: ${YELLOW}$GFK_QUIC_PORT${NC}"
+    echo -e "Paqet Port:    ${YELLOW}$PAQET_PORT${NC}"
     echo -e "Secret Key:    ${YELLOW}$KEY${NC}"
     echo -e "${GREEN}========================================${NC}"
 else
-    verify_tunnels
+    # Iran side needs Xray logic
+    setup_iran_xray
+    
     echo ""; echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}      CLIENT SETUP COMPLETE             ${NC}"
+    echo -e "${GREEN}      IRAN SETUP COMPLETE               ${NC}"
     echo -e "${GREEN}========================================${NC}"
-    [ "$INSTALL_PAQET" == "y" ] && echo -e "Paqet SOCKS5:  ${YELLOW}127.0.0.1:1080${NC}"
-    [ "$INSTALL_GFK" == "y" ] && echo -e "GFK SOCKS5:    ${YELLOW}127.0.0.1:1081${NC}"
+    echo -e "1. Paqet Tunnel: Connected to Kharej"
+    echo -e "2. Xray Bridge:  Running on Port $RAND_PORT"
+    echo -e "3. Traffic:      User -> Iran($RAND_PORT) -> SOCKS(1080) -> Kharej"
     echo -e "${GREEN}========================================${NC}"
 fi
