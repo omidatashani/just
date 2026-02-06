@@ -1,15 +1,16 @@
 #!/bin/bash
 
 # =========================================================
-#  MASTER TUNNEL PRO: Paqet + GFW-Knocker (Fixed Downloads)
+#  MASTER TUNNEL V3: FIXED DOWNLOADS & VERBOSE INSTALL
 # =========================================================
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Fixed URLs) ---
 PAQET_URL="https://github.com/hanselime/paqet/releases/download/v1.0.0-alpha.14/paqet-linux-amd64-v1.0.0-alpha.14.tar.gz"
 GFK_RAW_URL="https://raw.githubusercontent.com/SamNet-dev/paqctl/main/gfk"
 MICROSOCKS_URL="https://github.com/rofl0r/microsocks/archive/refs/heads/master.tar.gz"
 XUI_URL="https://github.com/MHSanaei/3x-ui/releases/download/v2.4.4/x-ui-linux-amd64.tar.gz"
-CORE_URL="https://github.com/GFW-knocker/Xray-core/releases/download/v1.8.24/Xray-linux-64.zip"
+# UPDATED: Official Xray Core URL (Reliable)
+CORE_URL="https://github.com/XTLS/Xray-core/releases/download/v1.8.23/Xray-linux-64.zip"
 
 # Default Ports
 PAQET_PORT=8880
@@ -32,7 +33,7 @@ print_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 check_root() { if [ "$EUID" -ne 0 ]; then print_error "Please run as root"; fi; }
 
-# --- SMART FILE DOWNLOADER (CURL FIXED) ---
+# --- SMART FILE DOWNLOADER ---
 get_file() {
     local name=$1; local url=$2; local dest=$3
     echo ""
@@ -56,31 +57,31 @@ get_file() {
     else
         print_info "Downloading $name..."
         rm -f "$dest"
-        # Use curl -L (follow redirects) --retry 3 (robustness)
-        if curl -L --retry 3 --connect-timeout 15 -o "$dest" "$url"; then
-            if [ -s "$dest" ]; then
+        # Increased timeout, show progress
+        if wget --show-progress -q -T 30 -c -O "$dest" "$url"; then
+            # Verify file size (Must be > 1KB)
+            FILESIZE=$(stat -c%s "$dest")
+            if [ "$FILESIZE" -lt 1000 ]; then
+                print_error "Download corrupted (File too small: $FILESIZE bytes). Link might be broken."
+            else
                 print_success "Download complete."
                 return 0
-            else
-                print_error "Downloaded file is empty."
             fi
         else
-            print_error "Download Failed! Please check internet or use Option 2 to provide local file."
+            print_error "Download Failed! Please upload '$name' manually and retry with Option 2."
         fi
     fi
 }
 
-# --- NETWORK SETUP ---
+# --- NETWORK ---
 install_dependencies() {
     print_info "Installing Dependencies..."
-    # Fix Apt Lock
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
 
-    # Added build-essential (for make) and python3-venv/pip
     PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip sqlite3 jq bc python3 python3-pip python3-venv build-essential"
     
     if ! apt-get install -y $PKGS; then
-        print_warn "Standard install failed. Trying Iran-Optimized Mirrors..."
+        print_warn "Apt failed. Switching mirrors..."
         if grep -q "ubuntu" /etc/os-release; then
              [ ! -f /etc/apt/sources.list.bak ] && cp /etc/apt/sources.list /etc/apt/sources.list.bak
              cat <<EOF > /etc/apt/sources.list
@@ -89,32 +90,27 @@ deb http://mirror.iranserver.com/ubuntu/ $(lsb_release -sc)-updates main restric
 deb http://mirror.iranserver.com/ubuntu/ $(lsb_release -sc)-backports main restricted universe multiverse
 deb http://mirror.iranserver.com/ubuntu/ $(lsb_release -sc)-security main restricted universe multiverse
 EOF
-             apt-get update -qq
+             apt-get update
         fi
         apt-get --fix-broken install -y
-        if ! apt-get install -y $PKGS; then
-            print_error "Critical: Could not install dependencies. Check internet."
-        fi
+        apt-get install -y $PKGS
     fi
 }
 
 detect_ip() {
-    SERVICES=("http://api.ipify.org" "http://ipv4.icanhazip.com")
-    PUBLIC_IP=""
-    for S in "${SERVICES[@]}"; do
-        PUBLIC_IP=$(curl -s --max-time 3 "$S")
-        [[ "$PUBLIC_IP" =~ ^[0-9]+\. ]] && break
-    done
+    # Try reliable API first
+    PUBLIC_IP=$(curl -s --max-time 3 http://api.ipify.org)
     
-    if [ -z "$PUBLIC_IP" ]; then
-        # Fallback to interface IP
+    # Fallback to interface scan
+    if [[ ! "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         DEF_IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
         PUBLIC_IP=$(ip -4 addr show $DEF_IFACE | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
     fi
 
+    # Manual fallback
     if [ -z "$PUBLIC_IP" ]; then
         print_warn "Could not detect IP."
-        read -p ">>> Enter this server's Public IP manually: " PUBLIC_IP
+        read -p ">>> Enter Public IP Manually: " PUBLIC_IP
     fi
     
     IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
@@ -185,19 +181,25 @@ EOF
 }
 
 # =========================================================
-#  2. GFW-KNOCKER SETUP
+#  2. GFW-KNOCKER SETUP (VERBOSE)
 # =========================================================
 setup_gfk() {
     print_info "Setting up GFW-Knocker ($GFK_VIO_PORT)..."
     
+    # 1. Python Venv (Verbose Install)
     if [ ! -f /root/gfk_env/bin/pip ]; then
-        print_info "Creating Python Env..."
+        print_info "Creating Python Environment (This may take a moment)..."
         rm -rf /root/gfk_env
         python3 -m venv /root/gfk_env
+        
+        print_info "Upgrading pip..."
         /root/gfk_env/bin/pip install --upgrade pip
-        if ! /root/gfk_env/bin/pip install scapy aioquic cryptography; then
-             print_warn "Pip install failed. Retrying..."
-             /root/gfk_env/bin/pip install scapy aioquic cryptography
+        
+        print_info "Installing Python Libraries (scapy, aioquic)..."
+        # Added -v to show progress in Iran
+        if ! /root/gfk_env/bin/pip install -v scapy aioquic cryptography; then
+             print_warn "Pip install failed. Retrying with increased timeout..."
+             /root/gfk_env/bin/pip install -v --default-timeout=100 scapy aioquic cryptography
         fi
     fi
 
@@ -205,31 +207,24 @@ setup_gfk() {
     cd /root/gfk
     
     if [ "$ROLE" == "server" ]; then
-        echo ""; echo -e "${YELLOW}>>> Source for GFK Server Scripts?${NC}"
-        echo "   1) Download from GitHub (Default)"
-        echo "   2) Use Local Files (Upload a ZIP)"
-        read -p "   Select [1-2]: " gfk_choice
-        gfk_choice=${gfk_choice:-1}
-
-        if [ "$gfk_choice" == "2" ]; then
-            read -p "   Enter path to ZIP file (e.g. /root/gfk.zip): " zip_path
-            if [ -f "$zip_path" ]; then
-                unzip -o "$zip_path" -d /root/gfk
-                print_success "Extracted local scripts."
-            else
-                print_error "File not found. Please upload and try again."
-            fi
-        else
+        if [ ! -f "mainserver.py" ]; then
+            # Direct download for server scripts
+            echo ""; echo "Downloading GFK Server Scripts..."
             wget -q "$GFK_RAW_URL/server/mainserver.py"
             wget -q "$GFK_RAW_URL/server/quic_server.py"
             wget -q "$GFK_RAW_URL/server/vio_server.py"
         fi
         openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=gfk" 2>/dev/null
     else
-        wget -q "$GFK_RAW_URL/client/mainclient.py"
-        wget -q "$GFK_RAW_URL/client/quic_client.py"
-        wget -q "$GFK_RAW_URL/client/vio_client.py"
+        # Client Files
+        if [ ! -f "mainclient.py" ]; then
+            echo ""; echo "Downloading GFK Client Scripts..."
+            wget -q "$GFK_RAW_URL/client/mainclient.py"
+            wget -q "$GFK_RAW_URL/client/quic_client.py"
+            wget -q "$GFK_RAW_URL/client/vio_client.py"
+        fi
         
+        # Microsocks
         if [ ! -f /usr/local/bin/microsocks ]; then
             get_file "Microsocks Source" "$MICROSOCKS_URL" "ms.tar.gz"
             mkdir -p ms_build
@@ -303,7 +298,7 @@ setup_server_options() {
     echo ""; echo -e "${CYAN}--- XRAY CONFIGURATION ---${NC}"
     echo "1) Install 3X-UI Panel"
     echo "2) Install Standalone VMess (Core Only)"
-    echo "3) Skip (No Xray)"
+    echo "3) Skip (Default)"
     read -p "Select [1-3]: " XCHOICE
     XCHOICE=${XCHOICE:-3}
 
@@ -314,11 +309,29 @@ setup_server_options() {
         mv x-ui /usr/local/
         /usr/local/x-ui/x-ui install
         
-    elif [ "$XCHOICE" == "2" ]; then
-        print_info "Installing Xray Core..."
+    elif [ "$XCHOICE" == "2" ] || [ "$ROLE" == "server" ]; then
+        
+        # If user selected SKIP (3), ask if they want the silent dependency
+        if [ "$XCHOICE" == "3" ]; then
+            echo ""; echo -e "${YELLOW}GFW-Knocker requires a local backend (SOCKS/VMess on 127.0.0.1:443).${NC}"
+            read -p "Install minimal Xray Core as backend? [Y/n]: " install_silent
+            install_silent=${install_silent:-y}
+            if [[ ! "$install_silent" =~ ^[Yy]$ ]]; then
+                print_warn "Skipping Xray. You must configure your own backend on port 443!"
+                return
+            fi
+            print_info "Installing Silent Xray Core..."
+        fi
+
         mkdir -p /usr/local/bin /usr/local/etc/xray
         get_file "Xray Core" "$CORE_URL" "xray.zip"
-        unzip -o xray.zip -d xtmp
+        
+        # Validate Zip
+        if ! unzip -t xray.zip >/dev/null 2>&1; then
+            print_error "Downloaded Xray zip is corrupted. Please try Option 2 (Local File) next time."
+        fi
+
+        unzip -o xray.zip -d xtmp >/dev/null
         mv xtmp/xray /usr/local/bin/
         chmod +x /usr/local/bin/xray
         rm -rf xtmp xray.zip
@@ -329,47 +342,13 @@ setup_server_options() {
   "inbounds": [{
     "port": 443,
     "listen": "127.0.0.1",
-    "protocol": "vmess",
-    "settings": { "clients": [{ "id": "$UUID" }] },
-    "streamSettings": { "network": "tcp" }
-  }],
-  "outbounds": [{ "protocol": "freedom" }]
-}
-EOF
-        nohup /usr/local/bin/xray -config /usr/local/etc/xray/config.json >/dev/null 2>&1 &
-        echo ""; echo "VMESS UUID: $UUID"
-        
-    else
-        # XCHOICE 3 (SKIP)
-        echo ""; echo -e "${YELLOW}GFW-Knocker needs a backend (SOCKS5/VMess on 127.0.0.1:443).${NC}"
-        read -p "Install minimal Xray Core as backend? (Recommended for GFK) [Y/n]: " install_silent
-        install_silent=${install_silent:-y}
-        
-        if [[ "$install_silent" =~ ^[Yy]$ ]]; then
-            print_info "Installing Silent Xray Core..."
-            mkdir -p /usr/local/bin /usr/local/etc/xray
-            get_file "Xray Core" "$CORE_URL" "xray.zip"
-            unzip -o xray.zip -d xtmp
-            mv xtmp/xray /usr/local/bin/
-            chmod +x /usr/local/bin/xray
-            rm -rf xtmp xray.zip
-            
-            cat <<EOF > /usr/local/etc/xray/config.json
-{
-  "inbounds": [{
-    "port": 443,
-    "listen": "127.0.0.1",
     "protocol": "socks",
     "settings": { "auth": "noauth", "udp": true }
   }],
   "outbounds": [{ "protocol": "freedom" }]
 }
 EOF
-            nohup /usr/local/bin/xray -config /usr/local/etc/xray/config.json >/dev/null 2>&1 &
-            print_success "Silent Xray Core running on 127.0.0.1:443"
-        else
-            print_warn "Skipped. You MUST set up your own backend on port 443 for GFK to work."
-        fi
+        nohup /usr/local/bin/xray -config /usr/local/etc/xray/config.json >/dev/null 2>&1 &
     fi
 }
 
@@ -378,18 +357,10 @@ verify_tunnels() {
     sleep 5
     
     IP1=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 http://api.ipify.org)
-    if [[ "$IP1" =~ [0-9]+\.[0-9]+ ]] || [[ "$IP1" =~ ":" ]]; then 
-        print_success "Paqet Tunnel OK! Exit: $IP1"
-    else
-        print_warn "Paqet Check Failed: $IP1"
-    fi
+    if [[ "$IP1" =~ [0-9]+\.[0-9]+ ]]; then print_success "Paqet Tunnel OK! IP: $IP1"; else print_warn "Paqet: $IP1"; fi
     
     IP2=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1081 http://api.ipify.org)
-    if [[ "$IP2" =~ [0-9]+\.[0-9]+ ]] || [[ "$IP2" =~ ":" ]]; then 
-        print_success "GFK Tunnel OK! Exit: $IP2"
-    else
-        print_warn "GFK Check Failed: $IP2"
-    fi
+    if [[ "$IP2" =~ [0-9]+\.[0-9]+ ]]; then print_success "GFK Tunnel OK! IP: $IP2"; else print_warn "GFK: $IP2"; fi
 }
 
 # =========================================================
@@ -398,7 +369,7 @@ verify_tunnels() {
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   MASTER DUAL TUNNEL (Paqet + GFW-Knocker)               ${NC}"
+echo -e "${CYAN}   MASTER DUAL TUNNEL (Paqet + GFW-Knocker2)               ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (VPS Outside)"
 echo "2) Iran Server   (VPS Bridge / Client)"
