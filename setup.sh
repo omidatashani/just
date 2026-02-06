@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # =========================================================
-#  PAQET SIMPLE TUNNEL V5.1: CLEAN & ROBUST
+#  PAQET SIMPLE TUNNEL
 # =========================================================
 
 # --- CONFIGURATION ---
 PAQET_VERSION="v1.0.0-alpha.14"
 PAQET_URL="https://github.com/hanselime/paqet/releases/download/${PAQET_VERSION}/paqet-linux-amd64-${PAQET_VERSION}.tar.gz"
-XUI_URL="https://github.com/MHSanaei/3x-ui/releases/download/v2.4.4/x-ui-linux-amd64.tar.gz"
+XUI_URL="https://github.com/MHSanaei/3x-ui/releases/download/v2.8.7/x-ui-linux-amd64.tar.gz"
 
 # Colors
 RED='\033[0;31m'
@@ -192,7 +192,7 @@ verify_paqet_client() {
 # =========================================================
 setup_iran_xui() {
     echo ""; echo -e "${CYAN}--- X-UI INSTALLATION ---${NC}"
-    echo "1) Install/Update 3X-UI Panel (Recommended)"
+    echo "1) Install/Update 3X-UI Panel)"
     echo "2) Skip (I have it installed)"
     read -p "Select [1-2]: " XCHOICE
     XCHOICE=${XCHOICE:-2}
@@ -256,12 +256,12 @@ EOF
     echo ""
     echo -e "${YELLOW}IMPORTANT FINAL STEP:${NC}"
     echo "1. Log into X-UI Panel."
-    echo "2. Go to [Panel Settings] -> [Xray Configuration]."
-    echo "3. Change the 'outbounds' (First Block) to point to Paqet:"
-    echo "   - Protocol: ${CYAN}socks${NC}"
-    echo "   - Address:  ${CYAN}127.0.0.1${NC}"
-    echo "   - Port:     ${CYAN}1080${NC}"
-    echo "4. Click Save & Restart."
+    echo "2. Go to Xray Configs"
+    echo "3. Add outbound (Third Block) to point to Paqet:"
+    echo "   - Protocol: socks"
+    echo "   - Address:  127.0.0.1"
+    echo "   - Port:     1080"
+    echo "4. Click Save and then Restart Xray."
     echo "5. Create your Inbounds (VMess/VLESS) normally."
     echo -e "${GREEN}========================================${NC}"
 }
@@ -272,7 +272,7 @@ EOF
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   PAQET SIMPLE TUNNEL (V5.1: Clean & Robust)             ${NC}"
+echo -e "${CYAN}   PAQET SIMPLE TUNNEL                                    ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (Tunnel Exit)"
 echo "2) Iran Server   (Tunnel Entry + Bridge)"
