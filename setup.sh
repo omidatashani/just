@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  ADVANCED SETUP: PAQET + X-UI + MIRRORS + VMESS GEN
+#  PAQET TUNNEL PRO V2 (Configurable Defaults)
 # =========================================================
 
 # --- CONFIG ---
@@ -14,6 +14,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 # --- HELPER FUNCTIONS ---
@@ -26,10 +27,18 @@ check_root() {
     if [ "$EUID" -ne 0 ]; then print_error "Please run as root (sudo bash setup.sh)"; fi
 }
 
-# --- ROBUST MIRROR FIXER ---
+optimize_dns() {
+    print_info "Optimizing DNS..."
+    [ ! -f /etc/resolv.conf.bak ] && cp /etc/resolv.conf /etc/resolv.conf.bak
+    cat > /etc/resolv.conf << EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 2001:4860:4860::8888
+EOF
+}
+
 fix_apt_mirrors() {
-    print_warn "Apt failed. Checking 20+ Iran Mirrors..."
-    
+    print_warn "Apt failed. Finding fastest Iran mirror..."
     if [ -f /etc/os-release ]; then
         source /etc/os-release
         if [ "$ID" != "ubuntu" ]; then return; fi
@@ -39,49 +48,33 @@ fix_apt_mirrors() {
     fi
 
     MIRRORS=(
+      "http://mirror.iranserver.com/ubuntu/"
       "https://mirrors.pardisco.co/ubuntu/"
       "http://mirror.aminidc.com/ubuntu/"
-      "http://mirror.faraso.org/ubuntu/"
-      "https://ir.ubuntu.sindad.cloud/ubuntu/"
-      "https://ubuntu-mirror.kimiahost.com/"
-      "https://archive.ubuntu.petiak.ir/ubuntu/"
-      "https://ubuntu.hostiran.ir/ubuntuarchive/"
-      "https://ubuntu.bardia.tech/"
-      "https://mirror.iranserver.com/ubuntu/"
-      "https://ir.archive.ubuntu.com/ubuntu/"
-      "https://mirror.0-1.cloud/ubuntu/"
-      "http://linuxmirrors.ir/pub/ubuntu/"
-      "http://repo.iut.ac.ir/repo/Ubuntu/"
       "https://ubuntu.shatel.ir/ubuntu/"
-      "http://ubuntu.byteiran.com/ubuntu/"
-      "https://mirror.rasanegar.com/ubuntu/"
-      "http://mirrors.sharif.ir/ubuntu/"
-      "http://mirror.ut.ac.ir/ubuntu/"
       "http://mirror.asiatech.ir/ubuntu/"
-      "http://archive.ubuntu.com/ubuntu/"
     )
 
-    WORKING_MIRROR=""
+    BEST_MIRROR=""
+    BEST_TIME=1000
+
     for MIRROR in "${MIRRORS[@]}"; do
-        echo -ne "   Testing $MIRROR ... "
-        if curl -s --head --max-time 1 "$MIRROR" | grep -q "200 OK"; then
-            echo -e "${GREEN}OK${NC}"
-            WORKING_MIRROR=$MIRROR
-            break
-        else
-            echo -e "${RED}FAIL${NC}"
+        TIME=$(curl -o /dev/null -s -w '%{time_total}\n' --max-time 2 "$MIRROR")
+        if [ $? -eq 0 ] && (( $(echo "$TIME < $BEST_TIME" | bc -l) )); then
+            BEST_TIME=$TIME
+            BEST_MIRROR=$MIRROR
         fi
     done
 
-    if [ -n "$WORKING_MIRROR" ]; then
+    if [ -n "$BEST_MIRROR" ]; then
+        print_success "Fastest Mirror: $BEST_MIRROR"
         cp /etc/apt/sources.list /etc/apt/sources.list.bak
         cat <<EOF > /etc/apt/sources.list
-deb ${WORKING_MIRROR} ${CODENAME} main restricted universe multiverse
-deb ${WORKING_MIRROR} ${CODENAME}-updates main restricted universe multiverse
-deb ${WORKING_MIRROR} ${CODENAME}-backports main restricted universe multiverse
-deb ${WORKING_MIRROR} ${CODENAME}-security main restricted universe multiverse
+deb ${BEST_MIRROR} ${CODENAME} main restricted universe multiverse
+deb ${BEST_MIRROR} ${CODENAME}-updates main restricted universe multiverse
+deb ${BEST_MIRROR} ${CODENAME}-backports main restricted universe multiverse
+deb ${BEST_MIRROR} ${CODENAME}-security main restricted universe multiverse
 EOF
-        print_success "Switched to: $WORKING_MIRROR"
         apt-get update
     fi
 }
@@ -90,17 +83,16 @@ install_dependencies() {
     print_info "Checking dependencies..."
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 2; done
 
-    # Added sqlite3 for database manipulation
-    PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip sqlite3 jq"
+    PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip sqlite3 jq bc"
     
-    if ! apt-get install -y $PKGS; then
+    if ! apt-get install -y --no-install-recommends $PKGS; then
+        optimize_dns
         fix_apt_mirrors
         apt-get --fix-broken install -y
-        apt-get install -y $PKGS
+        apt-get install -y --no-install-recommends $PKGS
     fi
 }
 
-# --- SMART FILE GETTER ---
 get_file() {
     local name=$1; local url=$2; local outfile=$3
     echo -e "${YELLOW}>>> How to get $name?${NC}"
@@ -125,7 +117,6 @@ detect_network() {
     print_info "Detecting network..."
     IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
     
-    # Robust IP Check
     SERVICES=("http://ipv4.icanhazip.com" "http://api.ipify.org" "http://ifconfig.me/ip")
     for S in "${SERVICES[@]}"; do
         PUBLIC_IP=$(curl -s --max-time 3 "$S")
@@ -141,7 +132,7 @@ detect_network() {
     fi
 
     if [ -z "$IFACE" ]; then print_error "Network fail."; fi
-    print_success "IP: $PUBLIC_IP | Iface: $IFACE | GW: $GATEWAY_MAC"
+    print_success "IP: $PUBLIC_IP | Iface: $IFACE"
 }
 
 setup_firewall() {
@@ -174,86 +165,146 @@ install_paqet() {
     chmod +x paqet
 }
 
-# --- X-UI & VMESS GENERATION ---
-install_xui_advanced() {
-    echo ""; read -p ">>> Install 3X-UI Panel? [Y/n]: " install_xui; install_xui=${install_xui:-y}
-    if [[ ! "$install_xui" =~ ^[Yy]$ ]]; then return; fi
+# --- STANDALONE CORE (NO PANEL) SETUP ---
+install_core_only() {
+    echo ""; read -p ">>> Setup Standalone VMess (Core Only)? [y/N]: " setup_core; setup_core=${setup_core:-n}
+    if [[ ! "$setup_core" =~ ^[Yy]$ ]]; then return; fi
 
-    cd /root; rm -rf x-ui*
-    get_file "X-UI Panel" "$XUI_URL" "x-ui.tar.gz"
+    print_info "Installing Xray Core..."
+    cd /root
+    get_file "Xray Core" "$CORE_URL" "xray.zip"
     
-    tar zxf x-ui.tar.gz
-    rm -rf /usr/local/x-ui
-    mv x-ui /usr/local/
-    chmod +x /usr/local/x-ui/x-ui /usr/local/x-ui/bin/xray-linux-* /usr/local/x-ui/x-ui.sh
-    cp /usr/local/x-ui/x-ui.sh /usr/bin/x-ui
+    mkdir -p /usr/local/bin /usr/local/etc/xray
+    unzip -o xray.zip -d xray_temp >/dev/null
+    mv xray_temp/xray /usr/local/bin/xray
+    chmod +x /usr/local/bin/xray
+    rm -rf xray.zip xray_temp
+
+    # Config Generation
+    UUID=$(cat /proc/sys/kernel/random/uuid)
+    RAND_PORT=$(shuf -i 2000-60000 -n 1)
     
-    if [ ! -f "/etc/systemd/system/x-ui.service" ]; then
-        wget -q -O /etc/systemd/system/x-ui.service https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.debian
-    fi
+    cat <<EOF > /usr/local/etc/xray/config.json
+{
+  "inbounds": [{
+    "port": $RAND_PORT,
+    "protocol": "vmess",
+    "settings": {
+      "clients": [{ "id": "$UUID", "alterId": 0 }]
+    },
+    "streamSettings": { "network": "tcp" }
+  }],
+  "outbounds": [
+    {
+      "protocol": "socks",
+      "settings": {
+        "servers": [{ "address": "127.0.0.1", "port": 1080 }]
+      }
+    },
+    { "protocol": "freedom", "tag": "direct" }
+  ]
+}
+EOF
 
-    # Swap Core Choice
-    read -p ">>> Swap Xray Core to GFW-Knocker? [y/N]: " swap_core; swap_core=${swap_core:-n}
-    if [[ "$swap_core" =~ ^[Yy]$ ]]; then
-        get_file "GFW-Knocker Core" "$CORE_URL" "xray.zip"
-        unzip -o xray.zip -d xray_temp
-        mv xray_temp/xray /usr/local/x-ui/bin/xray-linux-amd64
-        chmod +x /usr/local/x-ui/bin/xray-linux-amd64
-        rm -rf xray.zip xray_temp
-    fi
+    # Service
+    cat <<EOF > /etc/systemd/system/xray.service
+[Unit]
+Description=Xray Service
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/xray -config /usr/local/etc/xray/config.json
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    systemctl enable xray
+    systemctl restart xray
+    
+    # Link Generation
+    VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Core\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
+    VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
+    
+    echo ""; echo "=========================================================="
+    echo "✅ STANDALONE VMESS LINK:"; echo -e "${CYAN}$VMESS_LINK${NC}"
+    echo "=========================================================="
+}
 
-    systemctl daemon-reload; systemctl enable x-ui; systemctl restart x-ui
-    print_success "X-UI Installed."
+# --- X-UI & AUTOMATION ---
+install_xui_logic() {
+    # Default is NO
+    echo ""; read -p ">>> Install 3X-UI Panel? [y/N]: " install_xui; install_xui=${install_xui:-n}
+    
+    if [[ "$install_xui" =~ ^[Yy]$ ]]; then
+        # Install Panel
+        cd /root; rm -rf x-ui*
+        get_file "X-UI Panel" "$XUI_URL" "x-ui.tar.gz"
+        tar zxf x-ui.tar.gz
+        rm -rf /usr/local/x-ui; mv x-ui /usr/local/
+        chmod +x /usr/local/x-ui/x-ui /usr/local/x-ui/bin/xray-linux-* /usr/local/x-ui/x-ui.sh
+        cp /usr/local/x-ui/x-ui.sh /usr/bin/x-ui
+        if [ ! -f "/etc/systemd/system/x-ui.service" ]; then
+            wget -q -O /etc/systemd/system/x-ui.service https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.debian
+        fi
+        
+        # Core Swap (Default No)
+        read -p ">>> Swap Xray Core to GFW-Knocker? [y/N]: " swap_core; swap_core=${swap_core:-n}
+        if [[ "$swap_core" =~ ^[Yy]$ ]]; then
+            get_file "GFW-Knocker Core" "$CORE_URL" "xray.zip"
+            unzip -o xray.zip -d xray_temp
+            mv xray_temp/xray /usr/local/x-ui/bin/xray-linux-amd64
+            chmod +x /usr/local/x-ui/bin/xray-linux-amd64
+            rm -rf xray.zip xray_temp
+        fi
 
-    # --- AUTOMATED INBOUND CREATION ---
-    echo ""; read -p ">>> Auto-create VMess User? [Y/n]: " create_vmess; create_vmess=${create_vmess:-y}
-    if [[ "$create_vmess" =~ ^[Yy]$ ]]; then
-        
-        # 1. Gather Data
-        UUID=$(cat /proc/sys/kernel/random/uuid)
-        RAND_PORT=$(shuf -i 2000-60000 -n 1)
-        read -p "   Traffic Limit (GB) [0 = Unlimited]: " LIMIT_GB; LIMIT_GB=${LIMIT_GB:-0}
-        LIMIT_BYTES=$((LIMIT_GB * 1024 * 1024 * 1024))
-        
-        # 2. Insert into DB
-        print_info "Adding Inbound to Database..."
-        # Settings JSON for VMess
-        SETTINGS="{\"clients\": [{\"id\": \"$UUID\", \"alterId\": 0, \"email\": \"paqet_user\", \"limitIp\": 0, \"totalGB\": $LIMIT_BYTES, \"expiryTime\": 0, \"enable\": true, \"tgId\": \"\", \"subId\": \"\"}], \"disableInsecureEncryption\": false}"
-        # Stream Settings JSON
-        STREAM="{\"network\": \"tcp\", \"security\": \"none\", \"tcpSettings\": {\"acceptProxyProtocol\": false, \"header\": {\"type\": \"none\"}}}"
-        # Sniffing JSON
-        SNIFF="{\"enabled\": true, \"destOverride\": [\"http\", \"tls\", \"quic\", \"fakedns\"], \"metadataOnly\": false, \"routeOnly\": false}"
+        systemctl daemon-reload; systemctl enable x-ui; systemctl restart x-ui
+        print_success "X-UI Installed."
 
-        sqlite3 /etc/x-ui/x-ui.db "INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, client_stats, tag, protocol, port, settings, stream_settings, sniffing, listen) VALUES (1, 0, 0, $LIMIT_BYTES, 'Paqet-VMess', 1, 0, 0, 'vmess_auto', 'vmess', $RAND_PORT, '$SETTINGS', '$STREAM', '$SNIFF', '');"
-        
-        # 3. Generate Link
-        VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Tunnel\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
-        VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
-        
-        # 4. Restart X-UI to apply
-        systemctl restart x-ui
-        
-        echo ""
-        echo "=========================================================="
-        echo "✅ VMESS LINK CREATED:"
-        echo -e "${GREEN}$VMESS_LINK${NC}"
-        echo "=========================================================="
+        # Automated Inbound
+        echo ""; read -p ">>> Auto-create VMess User? [y/N]: " create_vmess; create_vmess=${create_vmess:-n}
+        if [[ "$create_vmess" =~ ^[Yy]$ ]]; then
+            UUID=$(cat /proc/sys/kernel/random/uuid)
+            RAND_PORT=$(shuf -i 2000-60000 -n 1)
+            SETTINGS="{\"clients\": [{\"id\": \"$UUID\", \"alterId\": 0, \"email\": \"paqet_user\", \"limitIp\": 0, \"totalGB\": 0, \"expiryTime\": 0, \"enable\": true, \"tgId\": \"\", \"subId\": \"\"}], \"disableInsecureEncryption\": false}"
+            STREAM="{\"network\": \"tcp\", \"security\": \"none\", \"tcpSettings\": {\"acceptProxyProtocol\": false, \"header\": {\"type\": \"none\"}}}"
+            SNIFF="{\"enabled\": true, \"destOverride\": [\"http\", \"tls\", \"quic\", \"fakedns\"], \"metadataOnly\": false, \"routeOnly\": false}"
+
+            sqlite3 /etc/x-ui/x-ui.db "INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, client_stats, tag, protocol, port, settings, stream_settings, sniffing, listen) VALUES (1, 0, 0, 0, 'Paqet-VMess', 1, 0, 0, 'vmess_auto', 'vmess', $RAND_PORT, '$SETTINGS', '$STREAM', '$SNIFF', '');"
+            
+            VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Tunnel\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
+            VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
+            
+            systemctl restart x-ui
+            echo ""; echo "=========================================================="
+            echo "✅ VMESS LINK:"; echo -e "${CYAN}$VMESS_LINK${NC}"
+            echo "=========================================================="
+        fi
+    else
+        # If NO Panel -> Ask for Core Only
+        install_core_only
     fi
 }
 
 check_tunnel() {
-    local remote=$1
     print_info "Checking Tunnel..."
     sleep 3
+    # Use ifconfig.me which often returns IPv6 if available
     IP=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 http://ifconfig.me)
-    if [ "$IP" == "$remote" ]; then print_success "TUNNEL OK! Exit: $IP"; else print_warn "Check: $IP"; fi
+    
+    # Success Logic: If IP is NOT empty and NOT our local IP, it's working (v4 or v6)
+    if [ -n "$IP" ] && [ "$IP" != "$PUBLIC_IP" ]; then
+        print_success "TUNNEL SUCCESS! Exit IP: $IP"
+    else
+        print_warn "Tunnel check inconclusive: $IP"
+    fi
 }
 
 # --- MAIN ---
-check_root; clear
-echo "=========================================================="
-echo "    ADVANCED SETUP (Mirrors + VMess Gen)                 "
-echo "=========================================================="
+clear
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║          PAQET TUNNEL SETUP (IRAN OPTIMIZED)                 ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
 echo "1) KHAREJ (Germany)"; echo "2) IRAN (Client)"
 read -p "Select [1-2]: " ROLE
 
@@ -261,7 +312,6 @@ if [ "$ROLE" == "1" ]; then
     install_dependencies; detect_network
     read -p "Port [8880]: " PORT; PORT=${PORT:-8880}
     KEY=$(openssl rand -hex 16)
-    
     install_paqet; setup_firewall "0.0.0.0" "$PORT" "server"
     
     cat <<EOF > /root/server.yaml
@@ -300,7 +350,10 @@ EOF
     echo "IP: $PUBLIC_IP | PORT: $PORT | KEY: $KEY"
 
 elif [ "$ROLE" == "2" ]; then
+    print_info "Optimizing Iran Server..."
+    optimize_dns
     install_dependencies; detect_network
+    
     read -p "Kharej IP: " REMOTE_IP
     read -p "Port [8880]: " REMOTE_PORT; REMOTE_PORT=${REMOTE_PORT:-8880}
     read -p "Key: " KEY
@@ -343,11 +396,10 @@ EOF
     systemctl daemon-reload; systemctl enable paqet; systemctl restart paqet
     
     check_tunnel "$REMOTE_IP"
-    install_xui_advanced
+    install_xui_logic
     
     echo "=========================================================="
     echo "SETUP COMPLETE."
-    echo "1. Configure Panel Settings -> Outbounds -> SOCKS 127.0.0.1:1080"
-    echo "2. Use the generated VMess link above."
+    echo "If you used X-UI or Core, your V2Ray config is ready."
     echo "=========================================================="
 fi
