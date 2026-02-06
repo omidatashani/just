@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  MASTER TUNNEL V5: PAQET + CLEAN X-UI
+#  PAQET SIMPLE TUNNEL V5.1: CLEAN & ROBUST
 # =========================================================
 
 # --- CONFIGURATION ---
@@ -77,12 +77,14 @@ install_dependencies() {
         if grep -q "ubuntu" /etc/os-release; then
              [ ! -f /etc/apt/sources.list.bak ] && cp /etc/apt/sources.list /etc/apt/sources.list.bak
              
-             # Use the fast mirrors you provided
+             # Full list of high-speed mirrors
              cat <<EOF > /etc/apt/sources.list
 deb http://mirror.aminidc.com/ubuntu/ $(lsb_release -sc) main restricted universe multiverse
 deb http://mirror.aminidc.com/ubuntu/ $(lsb_release -sc)-updates main restricted universe multiverse
 deb http://mirror.aminidc.com/ubuntu/ $(lsb_release -sc)-backports main restricted universe multiverse
 deb http://mirror.aminidc.com/ubuntu/ $(lsb_release -sc)-security main restricted universe multiverse
+deb http://mirror.iranserver.com/ubuntu/ $(lsb_release -sc) main restricted universe multiverse
+deb http://mirror.iranserver.com/ubuntu/ $(lsb_release -sc)-updates main restricted universe multiverse
 EOF
              apt-get update -qq
         fi
@@ -93,12 +95,10 @@ EOF
 
 detect_ip() {
     PUBLIC_IP=$(curl -s --max-time 3 http://api.ipify.org)
-    # Fallback to interface scan
     if [[ ! "$PUBLIC_IP" =~ ^[0-9]+\. ]]; then
         DEF_IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
         PUBLIC_IP=$(ip -4 addr show $DEF_IFACE | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
     fi
-    # Manual fallback
     [ -z "$PUBLIC_IP" ] && read -p ">>> Enter Public IP Manually: " PUBLIC_IP
     
     IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
@@ -176,14 +176,12 @@ EOF
 verify_paqet_client() {
     print_info "Verifying Connection..."
     sleep 5
-    
-    # Try fetching IP via local SOCKS proxy (1080)
     TUNNEL_IP=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 http://api.ipify.org)
     
     if [ -z "$TUNNEL_IP" ]; then
-        print_error "Verification Failed! Tunnel is not passing traffic."
+        print_error "Verification Failed! Could not connect to internet via tunnel."
     elif [ "$TUNNEL_IP" == "$PUBLIC_IP" ]; then
-        print_warn "Connected, but IP matches local ($TUNNEL_IP). Tunnel routing issue."
+        print_warn "Connected, but IP matches local ($TUNNEL_IP). Routing issue."
     else
         print_success "TUNNEL CONFIRMED! Traffic exiting via: $TUNNEL_IP"
     fi
@@ -194,7 +192,7 @@ verify_paqet_client() {
 # =========================================================
 setup_iran_xui() {
     echo ""; echo -e "${CYAN}--- X-UI INSTALLATION ---${NC}"
-    echo "1) Install/Update 3X-UI Panel (Correct Method)"
+    echo "1) Install/Update 3X-UI Panel (Recommended)"
     echo "2) Skip (I have it installed)"
     read -p "Select [1-2]: " XCHOICE
     XCHOICE=${XCHOICE:-2}
@@ -204,24 +202,39 @@ setup_iran_xui() {
         cd /root
         get_file "X-UI Panel" "$XUI_URL" "x-ui.tar.gz"
         
-        # Clean previous attempts
+        # Clean Install
         systemctl stop x-ui >/dev/null 2>&1
         rm -rf /usr/local/x-ui
-        
         tar zxf x-ui.tar.gz
         mv x-ui /usr/local/
         chmod +x /usr/local/x-ui/x-ui
         chmod +x /usr/local/x-ui/x-ui.sh
         
-        # --- FIX: Link the MANAGEMENT SCRIPT, not the binary ---
+        # Fix Command Line Tool
         rm -f /usr/bin/x-ui
         ln -s /usr/local/x-ui/x-ui.sh /usr/bin/x-ui
         
-        # Install Service (Standard Method)
-        cp /usr/local/x-ui/x-ui.service /etc/systemd/system/x-ui.service
+        # Create Service Manually (Avoids cp errors)
+        cat <<EOF > /etc/systemd/system/x-ui.service
+[Unit]
+Description=X-UI Service
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/x-ui
+ExecStart=/usr/local/x-ui/x-ui
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
         systemctl daemon-reload
         systemctl enable x-ui
+        
+        # First Run (Initialize DB)
+        print_info "Initializing..."
         systemctl start x-ui
+        sleep 5
         
         print_success "X-UI Installed Successfully."
     else
@@ -233,7 +246,6 @@ setup_iran_xui() {
     echo -e "${GREEN}      IRAN SETUP COMPLETE               ${NC}"
     echo -e "${GREEN}========================================${NC}"
     
-    # Run Verification
     verify_paqet_client
     
     echo "----------------------------------------"
@@ -243,27 +255,13 @@ setup_iran_xui() {
     echo -e "   Command:      Type ${YELLOW}x-ui${NC} to manage"
     echo ""
     echo -e "${YELLOW}IMPORTANT FINAL STEP:${NC}"
-    echo "1. Log into X-UI Panel"
-    echo "2. Go to 'Panel Settings' -> 'Xray Configuration'"
-    echo "3. Replace the entire content with this:"
-    echo ""
-    echo -e "${CYAN}{"
-    echo '  "log": { "loglevel": "warning" },'
-    echo '  "inbounds": [],'
-    echo '  "outbounds": ['
-    echo '    { "tag": "proxy", "protocol": "socks", "settings": { "servers": [{ "address": "127.0.0.1", "port": 1080 }] } },'
-    echo '    { "tag": "direct", "protocol": "freedom", "settings": {} },'
-    echo '    { "tag": "block", "protocol": "blackhole", "settings": {} }'
-    echo '  ],'
-    echo '  "routing": {'
-    echo '    "rules": ['
-    echo '      { "type": "field", "outboundTag": "block", "ip": [ "geoip:private" ] },'
-    echo '      { "type": "field", "outboundTag": "proxy", "network": "tcp,udp" }'
-    echo '    ]'
-    echo '  }'
-    echo "}${NC}"
-    echo ""
-    echo "4. Click Save & Restart Xray."
+    echo "1. Log into X-UI Panel."
+    echo "2. Go to [Panel Settings] -> [Xray Configuration]."
+    echo "3. Change the 'outbounds' (First Block) to point to Paqet:"
+    echo "   - Protocol: ${CYAN}socks${NC}"
+    echo "   - Address:  ${CYAN}127.0.0.1${NC}"
+    echo "   - Port:     ${CYAN}1080${NC}"
+    echo "4. Click Save & Restart."
     echo "5. Create your Inbounds (VMess/VLESS) normally."
     echo -e "${GREEN}========================================${NC}"
 }
@@ -274,7 +272,7 @@ setup_iran_xui() {
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   PAQET SIMPLE TUNNEL (V5: Clean & Stable)               ${NC}"
+echo -e "${CYAN}   PAQET SIMPLE TUNNEL (V5.1: Clean & Robust)             ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (Tunnel Exit)"
 echo "2) Iran Server   (Tunnel Entry + Bridge)"
