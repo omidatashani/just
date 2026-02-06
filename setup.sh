@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  PAQET SIMPLE TUNNEL V2: PAQET + OPTIONAL XRAY BRIDGE
+#  PAQET SIMPLE TUNNEL V3: VERIFIED CONNECTION
 # =========================================================
 
 # --- CONFIGURATION ---
@@ -167,6 +167,23 @@ EOF
     fi
 }
 
+verify_paqet_client() {
+    print_info "Verifying Connection..."
+    sleep 5
+    
+    # Try fetching IP via local SOCKS proxy (1080)
+    TUNNEL_IP=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 http://api.ipify.org)
+    
+    if [ -z "$TUNNEL_IP" ]; then
+        print_error "Verification Failed! Could not connect to internet via tunnel."
+        return 1
+    elif [ "$TUNNEL_IP" == "$PUBLIC_IP" ]; then
+        print_warn "Connected, but IP is same as local ($TUNNEL_IP). Tunnel might not be routing correctly."
+    else
+        print_success "TUNNEL CONFIRMED! Traffic exiting via: $TUNNEL_IP"
+    fi
+}
+
 # =========================================================
 #  IRAN-ONLY: XRAY BRIDGE SETUP
 # =========================================================
@@ -241,7 +258,10 @@ EOF
     echo ""; echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}      IRAN SETUP COMPLETE               ${NC}"
     echo -e "${GREEN}========================================${NC}"
-    echo -e "1. Paqet Tunnel: Connected to Kharej"
+    
+    # Run Verification Here
+    verify_paqet_client
+    echo "----------------------------------------"
     
     if [ "$XCHOICE" != "3" ]; then
         VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Iran\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
@@ -250,8 +270,8 @@ EOF
         echo -e "3. VMess Link:"
         echo -e "${CYAN}$VMESS_LINK${NC}"
     else
-        echo -e "2. Xray Bridge:  ${YELLOW}Use your existing Panel${NC}"
-        echo -e "3. Config Info:  Set your Outbound to ${CYAN}SOCKS5 127.0.0.1:1080${NC}"
+        echo -e "1. Xray Bridge:  ${YELLOW}Use your existing Panel${NC}"
+        echo -e "2. Config Info:  Set your Outbound to ${CYAN}SOCKS5 127.0.0.1:1080${NC}"
     fi
     echo -e "${GREEN}========================================${NC}"
 }
@@ -262,7 +282,7 @@ EOF
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge2)           ${NC}"
+echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge)           ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (Tunnel Exit)"
 echo "2) Iran Server   (Tunnel Entry + Bridge)"
