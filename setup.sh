@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  PAQET SIMPLE TUNNEL: PAQET + XRAY BRIDGE
+#  PAQET SIMPLE TUNNEL V2: PAQET + OPTIONAL XRAY BRIDGE
 # =========================================================
 
 # --- CONFIGURATION ---
@@ -68,7 +68,6 @@ install_dependencies() {
     print_info "Installing Dependencies..."
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
 
-    # Removed python/build deps since we removed GFK
     PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip sqlite3 jq bc"
     
     if ! apt-get install -y $PKGS; then
@@ -163,7 +162,6 @@ EOF
     systemctl daemon-reload; systemctl enable paqet; systemctl restart paqet
     
     if [ "$ROLE" == "client" ]; then
-        # Wait for Paqet to start before installing Xray
         print_info "Waiting for Paqet to initialize..."
         sleep 3
     fi
@@ -176,11 +174,14 @@ setup_iran_xray() {
     echo ""; echo -e "${CYAN}--- BRIDGE CONFIGURATION ---${NC}"
     echo "1) Install 3X-UI Panel (Visual Management)"
     echo "2) Install Simple Xray Core (Lightweight)"
-    read -p "Select [1-2]: " XCHOICE
-    XCHOICE=${XCHOICE:-2}
+    echo "3) I already have Xray/X-UI installed (Default)"
+    read -p "Select [1-3]: " XCHOICE
+    XCHOICE=${XCHOICE:-3}
 
-    UUID=$(cat /proc/sys/kernel/random/uuid)
-    RAND_PORT=$(shuf -i 2000-60000 -n 1)
+    if [ "$XCHOICE" != "3" ]; then
+        UUID=$(cat /proc/sys/kernel/random/uuid)
+        RAND_PORT=$(shuf -i 2000-60000 -n 1)
+    fi
 
     if [ "$XCHOICE" == "1" ]; then
         # --- X-UI ---
@@ -191,21 +192,13 @@ setup_iran_xray() {
         mv x-ui /usr/local/
         /usr/local/x-ui/x-ui install
         
-        # Automate Database Configuration (Inbound + Outbound)
         print_info "Configuring X-UI Database..."
-        # 1. Set Outbound to SOCKS 127.0.0.1:1080
         sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '[{\"tag\":\"proxy\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"127.0.0.1\",\"port\":1080}]}},{\"tag\":\"direct\",\"protocol\":\"freedom\",\"settings\":{}}]' WHERE key = 'xrayTemplateConfig';"
-        
-        # 2. Add VMess Inbound
-        SETTINGS="{\"clients\": [{\"id\": \"$UUID\", \"alterId\": 0, \"email\": \"paqet_user\", \"limitIp\": 0, \"totalGB\": 0, \"expiryTime\": 0, \"enable\": true, \"tgId\": \"\", \"subId\": \"\"}], \"disableInsecureEncryption\": false}"
-        STREAM="{\"network\": \"tcp\", \"security\": \"none\", \"tcpSettings\": {\"acceptProxyProtocol\": false, \"header\": {\"type\": \"none\"}}}"
-        SNIFF="{\"enabled\": true, \"destOverride\": [\"http\", \"tls\", \"quic\", \"fakedns\"], \"metadataOnly\": false, \"routeOnly\": false}"
-        
-        sqlite3 /etc/x-ui/x-ui.db "INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, client_stats, tag, protocol, port, settings, stream_settings, sniffing, listen) VALUES (1, 0, 0, 0, 'Paqet-VMess', 1, 0, 0, 'vmess_auto', 'vmess', $RAND_PORT, '$SETTINGS', '$STREAM', '$SNIFF', '');"
+        sqlite3 /etc/x-ui/x-ui.db "INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, client_stats, tag, protocol, port, settings, stream_settings, sniffing, listen) VALUES (1, 0, 0, 0, 'Paqet-VMess', 1, 0, 0, 'vmess_auto', 'vmess', $RAND_PORT, '{\"clients\": [{\"id\": \"$UUID\", \"alterId\": 0, \"email\": \"paqet_user\"}]}', '{\"network\": \"tcp\"}', '{\"enabled\": true}', '');"
         
         systemctl restart x-ui
         
-    else
+    elif [ "$XCHOICE" == "2" ]; then
         # --- CORE ONLY ---
         print_info "Installing Xray Core..."
         mkdir -p /usr/local/bin /usr/local/etc/xray
@@ -215,7 +208,6 @@ setup_iran_xray() {
         chmod +x /usr/local/bin/xray
         rm -rf xtmp xray.zip
         
-        # Config: Inbound VMess -> Outbound SOCKS(Paqet)
         cat <<EOF > /usr/local/etc/xray/config.json
 {
   "inbounds": [{
@@ -225,10 +217,7 @@ setup_iran_xray() {
     "streamSettings": { "network": "tcp" }
   }],
   "outbounds": [
-    {
-      "protocol": "socks",
-      "settings": { "servers": [{ "address": "127.0.0.1", "port": 1080 }] }
-    },
+    { "protocol": "socks", "settings": { "servers": [{ "address": "127.0.0.1", "port": 1080 }] } },
     { "protocol": "freedom", "tag": "direct" }
   ]
 }
@@ -244,17 +233,27 @@ Restart=always
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload; systemctl enable xray; systemctl restart xray
+    else
+        print_info "Skipping Xray installation (Using existing setup)."
     fi
 
-    # Generate Link
-    VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Iran\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
-    VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
-    
+    # Output based on choice
     echo ""; echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}      VMESS CONNECTION LINK             ${NC}"
+    echo -e "${GREEN}      IRAN SETUP COMPLETE               ${NC}"
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${CYAN}$VMESS_LINK${NC}"
-    echo "----------------------------------------"
+    echo -e "1. Paqet Tunnel: Connected to Kharej"
+    
+    if [ "$XCHOICE" != "3" ]; then
+        VMESS_JSON="{\"v\":\"2\",\"ps\":\"Paqet-Iran\",\"add\":\"$PUBLIC_IP\",\"port\":\"$RAND_PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"
+        VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
+        echo -e "2. Xray Bridge:  Running on Port $RAND_PORT"
+        echo -e "3. VMess Link:"
+        echo -e "${CYAN}$VMESS_LINK${NC}"
+    else
+        echo -e "2. Xray Bridge:  ${YELLOW}Use your existing Panel${NC}"
+        echo -e "3. Config Info:  Set your Outbound to ${CYAN}SOCKS5 127.0.0.1:1080${NC}"
+    fi
+    echo -e "${GREEN}========================================${NC}"
 }
 
 # =========================================================
@@ -263,7 +262,7 @@ EOF
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge)           ${NC}"
+echo -e "${CYAN}   PAQET SIMPLE TUNNEL (Kharej <-> Iran Bridge2)           ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (Tunnel Exit)"
 echo "2) Iran Server   (Tunnel Entry + Bridge)"
@@ -298,14 +297,5 @@ if [ "$ROLE" == "server" ]; then
     echo -e "Secret Key:    ${YELLOW}$KEY${NC}"
     echo -e "${GREEN}========================================${NC}"
 else
-    # Iran side needs Xray logic
     setup_iran_xray
-    
-    echo ""; echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}      IRAN SETUP COMPLETE               ${NC}"
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "1. Paqet Tunnel: Connected to Kharej"
-    echo -e "2. Xray Bridge:  Running on Port $RAND_PORT"
-    echo -e "3. Traffic:      User -> Iran($RAND_PORT) -> SOCKS(1080) -> Kharej"
-    echo -e "${GREEN}========================================${NC}"
 fi
