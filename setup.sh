@@ -5,7 +5,7 @@
 # =========================================================
 
 # --- CONFIGURATION ---
-PAQET_VERSION="v1.0.0-alpha.14"
+PAQET_VERSION="v1.0.0-alpha.15"
 PAQET_URL="https://github.com/hanselime/paqet/releases/download/${PAQET_VERSION}/paqet-linux-amd64-${PAQET_VERSION}.tar.gz"
 XUI_URL="https://github.com/MHSanaei/3x-ui/releases/download/v2.8.7/x-ui-linux-amd64.tar.gz"
 
@@ -53,7 +53,7 @@ get_file() {
         print_info "Downloading $name..."
         rm -f "$dest"
         if curl -L --progress-bar --retry 3 --connect-timeout 20 -o "$dest" "$url"; then
-            if [ -s "$dest" ]; then
+            if [ -s "$dest" ] && [ $(stat -c%s "$dest") -gt 1000 ]; then
                 print_success "Download complete."
                 return 0
             else
@@ -113,7 +113,7 @@ setup_firewall_bypass() {
 }
 
 # =========================================================
-#  PAQET SETUP 
+#  PAQET SETUP (TUNED: CONN 32 + 2MB BUFFER)
 # =========================================================
 setup_paqet() {
     print_info "Setting up Paqet ($PAQET_PORT)..."
@@ -128,7 +128,6 @@ setup_paqet() {
     setup_firewall_bypass "$PAQET_PORT"
 
     if [ "$ROLE" == "server" ]; then
-        # SERVER CONFIG (Conn 32)
         cat <<EOF > /root/paqet_server.yaml
 role: "server"
 log:
@@ -152,7 +151,6 @@ transport:
 EOF
         CMD="/root/paqet run -c /root/paqet_server.yaml"
     else
-        # CLIENT CONFIG (Conn 32 + Sockbuf 2097152)
         cat <<EOF > /root/paqet_client.yaml
 role: "client"
 log:
@@ -192,7 +190,6 @@ Restart=always
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload; systemctl enable paqet; systemctl restart paqet
-    
     if [ "$ROLE" == "client" ]; then
         print_info "Waiting for Paqet to initialize..."
         sleep 3
@@ -204,7 +201,7 @@ verify_paqet_client() {
     sleep 5
     TUNNEL_IP=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 http://api.ipify.org)
     if [ -z "$TUNNEL_IP" ]; then
-        print_error "Verification Failed! Could not connect to internet via tunnel."
+        print_error "Verification Failed! Tunnel is not passing traffic."
     elif [ "$TUNNEL_IP" == "$PUBLIC_IP" ]; then
         print_warn "Connected, but IP matches local ($TUNNEL_IP). Routing issue."
     else
@@ -213,12 +210,69 @@ verify_paqet_client() {
 }
 
 # =========================================================
+#  WATCHDOG SETUP (AUTO-REPAIR)
+# =========================================================
+setup_watchdog() {
+    print_info "Setting up Connection Watchdog..."
+    
+    # Create Watchdog Script
+    cat <<EOF > /usr/local/bin/paqet_watchdog.sh
+#!/bin/bash
+# Checks Paqet connection. If failed, restarts service.
+
+LOGFILE="/var/log/paqet_watchdog.log"
+TARGET="http://api.ipify.org"
+PROXY="socks5h://127.0.0.1:1080"
+
+# Check connection with timeout
+HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 --proxy "\$PROXY" "\$TARGET")
+
+if [ "\$HTTP_CODE" != "200" ]; then
+    echo "\$(date): Connection Failed (Code: \$HTTP_CODE). Restarting Paqet..." >> \$LOGFILE
+    systemctl restart paqet
+else
+    # Uncomment next line for verbose success logging
+    # echo "\$(date): Connection OK." >> \$LOGFILE
+    :
+fi
+EOF
+    chmod +x /usr/local/bin/paqet_watchdog.sh
+
+    # Create Systemd Timer (Runs every 30 minutes)
+    cat <<EOF > /etc/systemd/system/paqet-watchdog.service
+[Unit]
+Description=Paqet Connection Watchdog
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/paqet_watchdog.sh
+EOF
+
+    cat <<EOF > /etc/systemd/system/paqet-watchdog.timer
+[Unit]
+Description=Run Paqet Watchdog every 30 minutes
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable paqet-watchdog.timer
+    systemctl start paqet-watchdog.timer
+    print_success "Watchdog Active (Checks every 30 mins)."
+}
+
+# =========================================================
 #  IRAN-ONLY: X-UI SETUP
 # =========================================================
 setup_iran_xui() {
     echo ""; echo -e "${CYAN}--- X-UI INSTALLATION ---${NC}"
     echo "1) Install/Update 3X-UI Panel"
-    echo "2) Skip (I have it installed)"
+    echo "2) Skip (I have it installed or will install later)"
     read -p "Select [1-2]: " XCHOICE
     XCHOICE=${XCHOICE:-2}
 
@@ -226,17 +280,14 @@ setup_iran_xui() {
         print_info "Installing X-UI..."
         cd /root
         get_file "X-UI Panel" "$XUI_URL" "x-ui.tar.gz"
-        
         systemctl stop x-ui >/dev/null 2>&1
         rm -rf /usr/local/x-ui
         tar zxf x-ui.tar.gz
         mv x-ui /usr/local/
         chmod +x /usr/local/x-ui/x-ui
         chmod +x /usr/local/x-ui/x-ui.sh
-        
         rm -f /usr/bin/x-ui
         ln -s /usr/local/x-ui/x-ui.sh /usr/bin/x-ui
-        
         cat <<EOF > /etc/systemd/system/x-ui.service
 [Unit]
 Description=X-UI Service
@@ -253,8 +304,6 @@ EOF
         systemctl daemon-reload
         systemctl enable x-ui
         systemctl start x-ui
-        
-        # Initialize DB
         print_info "Initializing..."
         sleep 5
         print_success "X-UI Installed Successfully."
@@ -262,13 +311,10 @@ EOF
         print_info "Skipping X-UI installation."
     fi
 
-    # Output instructions
     echo ""; echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}      IRAN SETUP COMPLETE               ${NC}"
     echo -e "${GREEN}========================================${NC}"
-    
     verify_paqet_client
-    
     echo "----------------------------------------"
     echo -e "1. Paqet Tunnel: Connected to Kharej"
     echo -e "2. X-UI Panel:   http://$PUBLIC_IP:2053"
@@ -277,7 +323,7 @@ EOF
     echo ""
     echo -e "${YELLOW}IMPORTANT FINAL STEP:${NC}"
     echo "1. Log into X-UI Panel."
-    echo "2. Go to Xray Configs"
+    echo "2. Go to [Panel Settings] -> [Xray Configuration]."
     echo "3. Add outbound (Third Block) to point to Paqet:"
     echo "   - Protocol: socks"
     echo "   - Address:  127.0.0.1"
@@ -327,5 +373,6 @@ if [ "$ROLE" == "server" ]; then
     echo -e "Secret Key:    ${YELLOW}$KEY${NC}"
     echo -e "${GREEN}========================================${NC}"
 else
+    setup_watchdog
     setup_iran_xui
 fi
