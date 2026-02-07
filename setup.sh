@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  PAQET SIMPLE TUNNEL
+#  PAQET TUNNEL
 # =========================================================
 
 # --- CONFIGURATION ---
@@ -25,7 +25,7 @@ print_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 check_root() { if [ "$EUID" -ne 0 ]; then print_error "Please run as root"; fi; }
 
-# --- SMART FILE DOWNLOADER ---
+# --- DOWNLOADER ---
 get_file() {
     local name=$1; local url=$2; local dest=$3
     mkdir -p "$(dirname "$dest")"
@@ -65,19 +65,15 @@ get_file() {
     fi
 }
 
-# --- DEPENDENCIES & MIRRORS ---
+# --- DEPENDENCIES ---
 install_dependencies() {
     print_info "Installing Dependencies..."
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
-
     PKGS="libpcap-dev iptables-persistent netfilter-persistent curl wget tar openssl net-tools unzip sqlite3 jq bc"
-    
     if ! apt-get install -y $PKGS; then
         print_warn "Apt failed. Switching to Iran mirrors..."
         if grep -q "ubuntu" /etc/os-release; then
              [ ! -f /etc/apt/sources.list.bak ] && cp /etc/apt/sources.list /etc/apt/sources.list.bak
-             
-             # Full list of high-speed mirrors
              cat <<EOF > /etc/apt/sources.list
 deb http://mirror.aminidc.com/ubuntu/ $(lsb_release -sc) main restricted universe multiverse
 deb http://mirror.aminidc.com/ubuntu/ $(lsb_release -sc)-updates main restricted universe multiverse
@@ -100,12 +96,10 @@ detect_ip() {
         PUBLIC_IP=$(ip -4 addr show $DEF_IFACE | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
     fi
     [ -z "$PUBLIC_IP" ] && read -p ">>> Enter Public IP Manually: " PUBLIC_IP
-    
     IFACE=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+')
     GW_IP=$(ip route get 8.8.8.8 | awk '{print $3}')
     GW_MAC=$(ip neigh show $GW_IP | awk '{print $5}' | head -n1)
     [ -z "$GW_MAC" ] && ping -c 1 $GW_IP >/dev/null && GW_MAC=$(ip neigh show $GW_IP | awk '{print $5}' | head -n1)
-    
     print_success "IP: $PUBLIC_IP | IF: $IFACE"
 }
 
@@ -119,7 +113,7 @@ setup_firewall_bypass() {
 }
 
 # =========================================================
-#  PAQET SETUP
+#  PAQET SETUP 
 # =========================================================
 setup_paqet() {
     print_info "Setting up Paqet ($PAQET_PORT)..."
@@ -131,26 +125,58 @@ setup_paqet() {
         [ -f "paqet-linux-amd64" ] && mv paqet-linux-amd64 paqet
         chmod +x paqet
     fi
-    
     setup_firewall_bypass "$PAQET_PORT"
 
     if [ "$ROLE" == "server" ]; then
+        # SERVER CONFIG (Conn 32)
         cat <<EOF > /root/paqet_server.yaml
 role: "server"
-log: { level: "info" }
-listen: { addr: ":$PAQET_PORT" }
-network: { interface: "$IFACE", ipv4: { addr: "$PUBLIC_IP:$PAQET_PORT", router_mac: "$GW_MAC" } }
-transport: { protocol: "kcp", kcp: { block: "aes", key: "$KEY" } }
+log:
+  level: "info"
+listen:
+  addr: ":$PAQET_PORT"
+network:
+  interface: "$IFACE"
+  ipv4:
+    addr: "$PUBLIC_IP:$PAQET_PORT"
+    router_mac: "$GW_MAC"
+  tcp:
+    local_flag: ["PA"]
+    remote_flag: ["PA"]
+transport:
+  protocol: "kcp"
+  conn: 32
+  kcp:
+    mode: "fast"
+    key: "$KEY"
 EOF
         CMD="/root/paqet run -c /root/paqet_server.yaml"
     else
+        # CLIENT CONFIG (Conn 32 + Sockbuf 2097152)
         cat <<EOF > /root/paqet_client.yaml
 role: "client"
-log: { level: "info" }
-socks5: [ { listen: "127.0.0.1:1080" } ]
-network: { interface: "$IFACE", ipv4: { addr: "$PUBLIC_IP:0", router_mac: "$GW_MAC" } }
-server: { addr: "$REMOTE_IP:$PAQET_PORT" }
-transport: { protocol: "kcp", kcp: { block: "aes", key: "$KEY" } }
+log:
+  level: "info"
+socks5:
+  - listen: "127.0.0.1:1080"
+network:
+  interface: "$IFACE"
+  ipv4:
+    addr: "$PUBLIC_IP:0"
+    router_mac: "$GW_MAC"
+  tcp:
+    local_flag: ["PA"]
+    remote_flag: ["PA"]
+  pcap:
+    sockbuf: 2097152
+server:
+  addr: "$REMOTE_IP:$PAQET_PORT"
+transport:
+  protocol: "kcp"
+  conn: 32
+  kcp:
+    mode: "fast"
+    key: "$KEY"
 EOF
         CMD="/root/paqet run -c /root/paqet_client.yaml"
     fi
@@ -177,7 +203,6 @@ verify_paqet_client() {
     print_info "Verifying Connection..."
     sleep 5
     TUNNEL_IP=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 http://api.ipify.org)
-    
     if [ -z "$TUNNEL_IP" ]; then
         print_error "Verification Failed! Could not connect to internet via tunnel."
     elif [ "$TUNNEL_IP" == "$PUBLIC_IP" ]; then
@@ -188,11 +213,11 @@ verify_paqet_client() {
 }
 
 # =========================================================
-#  IRAN-ONLY: X-UI CLEAN INSTALL
+#  IRAN-ONLY: X-UI SETUP
 # =========================================================
 setup_iran_xui() {
     echo ""; echo -e "${CYAN}--- X-UI INSTALLATION ---${NC}"
-    echo "1) Install/Update 3X-UI Panel)"
+    echo "1) Install/Update 3X-UI Panel (Correct Method)"
     echo "2) Skip (I have it installed)"
     read -p "Select [1-2]: " XCHOICE
     XCHOICE=${XCHOICE:-2}
@@ -202,7 +227,6 @@ setup_iran_xui() {
         cd /root
         get_file "X-UI Panel" "$XUI_URL" "x-ui.tar.gz"
         
-        # Clean Install
         systemctl stop x-ui >/dev/null 2>&1
         rm -rf /usr/local/x-ui
         tar zxf x-ui.tar.gz
@@ -210,11 +234,9 @@ setup_iran_xui() {
         chmod +x /usr/local/x-ui/x-ui
         chmod +x /usr/local/x-ui/x-ui.sh
         
-        # Fix Command Line Tool
         rm -f /usr/bin/x-ui
         ln -s /usr/local/x-ui/x-ui.sh /usr/bin/x-ui
         
-        # Create Service Manually (Avoids cp errors)
         cat <<EOF > /etc/systemd/system/x-ui.service
 [Unit]
 Description=X-UI Service
@@ -230,12 +252,11 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable x-ui
-        
-        # First Run (Initialize DB)
-        print_info "Initializing..."
         systemctl start x-ui
-        sleep 5
         
+        # Initialize DB
+        print_info "Initializing..."
+        sleep 5
         print_success "X-UI Installed Successfully."
     else
         print_info "Skipping X-UI installation."
@@ -256,12 +277,12 @@ EOF
     echo ""
     echo -e "${YELLOW}IMPORTANT FINAL STEP:${NC}"
     echo "1. Log into X-UI Panel."
-    echo "2. Go to Xray Configs"
-    echo "3. Add outbound (Third Block) to point to Paqet:"
-    echo "   - Protocol: socks"
-    echo "   - Address:  127.0.0.1"
-    echo "   - Port:     1080"
-    echo "4. Click Save and then Restart Xray."
+    echo "2. Go to 'Panel Settings' -> 'Xray Configuration'"
+    echo "3. Change the 'outbounds' (First Block) to point to Paqet:"
+    echo "   - Protocol: ${CYAN}socks${NC}"
+    echo "   - Address:  ${CYAN}127.0.0.1${NC}"
+    echo "   - Port:     ${CYAN}1080${NC}"
+    echo "4. Click Save & Restart."
     echo "5. Create your Inbounds (VMess/VLESS) normally."
     echo -e "${GREEN}========================================${NC}"
 }
@@ -272,7 +293,7 @@ EOF
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   PAQET SIMPLE TUNNEL                                    ${NC}"
+echo -e "${CYAN}   PAQET TUNNEL                                           ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (Tunnel Exit)"
 echo "2) Iran Server   (Tunnel Entry + Bridge)"
@@ -283,7 +304,6 @@ if [ "$ROLE_NUM" == "1" ]; then ROLE="server"; else ROLE="client"; fi
 install_dependencies
 detect_ip
 
-# --- PORTS ---
 echo ""; echo -e "${CYAN}--- CONFIGURATION ---${NC}"
 read -p "Paqet Port (Press Enter for 8880): " PAQET_PORT; PAQET_PORT=${PAQET_PORT:-8880}
 
