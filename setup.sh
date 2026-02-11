@@ -133,7 +133,7 @@ role: "server"
 log:
   level: "info"
 listen:
-  addr: ":$PAQET_PORT"
+  addr: "0.0.0.0:$PAQET_PORT"
 network:
   interface: "$IFACE"
   ipv4:
@@ -157,6 +157,10 @@ log:
   level: "info"
 socks5:
   - listen: "127.0.0.1:1080"
+forward:
+  - listen: "0.0.0.0:$PORT_FORWARD_FROM"
+    target: "127.0.0.1:$PORT_FORWARD_TO"
+    protocol: "tcp"
 network:
   interface: "$IFACE"
   ipv4:
@@ -359,6 +363,8 @@ else
     echo ""; echo -e "${CYAN}--- KHAREJ DETAILS ---${NC}"
     read -p "Kharej Server IP: " REMOTE_IP
     read -p "Secret Key (from Kharej): " KEY
+    read -p "Port forwarding from: " PORT_FORWARD_FROM
+    read -p "Port forwarding to: " PORT_FORWARD_TO
 fi
 
 setup_paqet
@@ -374,5 +380,6 @@ if [ "$ROLE" == "server" ]; then
     echo -e "${GREEN}========================================${NC}"
 else
     setup_watchdog
-    setup_iran_xui
+    # We don't need it anymore use port forwarding instead
+    # setup_iran_xui
 fi
