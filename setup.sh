@@ -343,7 +343,7 @@ EOF
 check_root
 clear
 echo -e "${CYAN}==========================================================${NC}"
-echo -e "${CYAN}   PAQET TUNNEL                                           ${NC}"
+echo -e "${CYAN}   PAQET TUNNEL 2                                         ${NC}"
 echo -e "${CYAN}==========================================================${NC}"
 echo "1) Kharej Server (Tunnel Exit)"
 echo "2) Iran Server   (Tunnel Entry + Bridge)"
