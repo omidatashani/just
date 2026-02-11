@@ -144,7 +144,7 @@ network:
     remote_flag: ["PA"]
 transport:
   protocol: "kcp"
-  conn: 32
+  conn: 16
   kcp:
     mode: "fast"
     key: "$KEY"
@@ -175,7 +175,7 @@ server:
   addr: "$REMOTE_IP:$PAQET_PORT"
 transport:
   protocol: "kcp"
-  conn: 32
+  conn: 16
   kcp:
     mode: "fast"
     key: "$KEY"
